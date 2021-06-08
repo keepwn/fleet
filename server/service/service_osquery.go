@@ -560,6 +560,22 @@ var detailQueries = map[string]detailQuery{
 			return nil
 		},
 	},
+	"kubernetes_info": {
+		Query: "select * from kubernetes_info limit 1",
+		IngestFunc: func(logger log.Logger, host *kolide.Host, rows []map[string]string) error {
+			if len(rows) == 0 {
+				logger.Log("component", "service", "method", "IngestFunc", "err",
+					"detail_query_kubernetes_info not found, ignored")
+				return nil
+			}
+
+			// should override the origin info from system_info
+			host.HostName = rows[0]["cluster_name"]
+			host.UUID = rows[0]["cluster_uid"]
+
+			return nil
+		},
+	},
 	"uptime": {
 		Query: "select * from uptime limit 1",
 		IngestFunc: func(logger log.Logger, host *kolide.Host, rows []map[string]string) error {
