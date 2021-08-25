@@ -6,9 +6,12 @@ import (
 	"html/template"
 	"strings"
 
-	"github.com/fleetdm/fleet/server/contexts/viewer"
-	"github.com/fleetdm/fleet/server/kolide"
-	"github.com/fleetdm/fleet/server/mail"
+	"github.com/fleetdm/fleet/v4/server"
+	"github.com/fleetdm/fleet/v4/server/ptr"
+
+	"github.com/fleetdm/fleet/v4/server/contexts/viewer"
+	"github.com/fleetdm/fleet/v4/server/fleet"
+	"github.com/fleetdm/fleet/v4/server/mail"
 	"github.com/kolide/kit/version"
 	"github.com/pkg/errors"
 )
@@ -24,19 +27,25 @@ func (e mailError) Error() string {
 
 func (e mailError) MailError() []map[string]string {
 	return []map[string]string{
-		map[string]string{
+		{
 			"name":   "base",
 			"reason": e.message,
 		},
 	}
 }
 
-func (svc service) NewAppConfig(ctx context.Context, p kolide.AppConfigPayload) (*kolide.AppConfig, error) {
+func (svc *Service) NewAppConfig(ctx context.Context, p fleet.AppConfigPayload) (*fleet.AppConfig, error) {
+	// skipauth: No user context yet when the app config is first created.
+	svc.authz.SkipAuthorization(ctx)
+
 	config, err := svc.ds.AppConfig()
 	if err != nil {
 		return nil, err
 	}
 	fromPayload := appConfigFromAppConfigPayload(p, *config)
+
+	// Usage analytics are on by default in new installations.
+	fromPayload.EnableAnalytics = true
 
 	newConfig, err := svc.ds.NewAppConfig(fromPayload)
 	if err != nil {
@@ -44,20 +53,16 @@ func (svc service) NewAppConfig(ctx context.Context, p kolide.AppConfigPayload) 
 	}
 
 	// Set up a default enroll secret
-	secret, err := kolide.RandomText(24)
+	secret, err := server.GenerateRandomText(fleet.EnrollSecretDefaultLength)
 	if err != nil {
 		return nil, errors.Wrap(err, "generate enroll secret string")
 	}
-	spec := &kolide.EnrollSecretSpec{
-		Secrets: []kolide.EnrollSecret{
-			kolide.EnrollSecret{
-				Name:   "default",
-				Secret: secret,
-				Active: true,
-			},
+	secrets := []*fleet.EnrollSecret{
+		{
+			Secret: secret,
 		},
 	}
-	err = svc.ds.ApplyEnrollSecretSpec(spec)
+	err = svc.ds.ApplyEnrollSecrets(nil, secrets)
 	if err != nil {
 		return nil, errors.Wrap(err, "save enroll secret")
 	}
@@ -65,21 +70,25 @@ func (svc service) NewAppConfig(ctx context.Context, p kolide.AppConfigPayload) 
 	return newConfig, nil
 }
 
-func (svc service) AppConfig(ctx context.Context) (*kolide.AppConfig, error) {
+func (svc *Service) AppConfig(ctx context.Context) (*fleet.AppConfig, error) {
+	if err := svc.authz.Authorize(ctx, &fleet.AppConfig{}, fleet.ActionRead); err != nil {
+		return nil, err
+	}
+
 	return svc.ds.AppConfig()
 }
 
-func (svc service) SendTestEmail(ctx context.Context, config *kolide.AppConfig) error {
+func (svc *Service) sendTestEmail(ctx context.Context, config *fleet.AppConfig) error {
 	vc, ok := viewer.FromContext(ctx)
 	if !ok {
-		return errNoContext
+		return fleet.ErrNoContext
 	}
 
-	testMail := kolide.Email{
+	testMail := fleet.Email{
 		Subject: "Hello from Fleet",
 		To:      []string{vc.User.Email},
 		Mailer: &mail.SMTPTestMailer{
-			BaseURL:  template.URL(config.KolideServerURL + svc.config.Server.URLPrefix),
+			BaseURL:  template.URL(config.ServerURL + svc.config.Server.URLPrefix),
 			AssetURL: getAssetURL(),
 		},
 		Config: config,
@@ -92,7 +101,11 @@ func (svc service) SendTestEmail(ctx context.Context, config *kolide.AppConfig) 
 
 }
 
-func (svc service) ModifyAppConfig(ctx context.Context, p kolide.AppConfigPayload) (*kolide.AppConfig, error) {
+func (svc *Service) ModifyAppConfig(ctx context.Context, p fleet.AppConfigPayload) (*fleet.AppConfig, error) {
+	if err := svc.authz.Authorize(ctx, &fleet.AppConfig{}, fleet.ActionWrite); err != nil {
+		return nil, err
+	}
+
 	oldAppConfig, err := svc.AppConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -102,7 +115,7 @@ func (svc service) ModifyAppConfig(ctx context.Context, p kolide.AppConfigPayloa
 	if p.SMTPSettings != nil {
 		enabled := p.SMTPSettings.SMTPEnabled
 		if (enabled == nil && oldAppConfig.SMTPConfigured) || (enabled != nil && *enabled) {
-			if err = svc.SendTestEmail(ctx, config); err != nil {
+			if err = svc.sendTestEmail(ctx, config); err != nil {
 				return nil, err
 			}
 			config.SMTPConfigured = true
@@ -121,18 +134,23 @@ func cleanupURL(url string) string {
 	return strings.TrimRight(strings.Trim(url, " \t\n"), "/")
 }
 
-func appConfigFromAppConfigPayload(p kolide.AppConfigPayload, config kolide.AppConfig) *kolide.AppConfig {
+func appConfigFromAppConfigPayload(p fleet.AppConfigPayload, config fleet.AppConfig) *fleet.AppConfig {
 	if p.OrgInfo != nil && p.OrgInfo.OrgLogoURL != nil {
 		config.OrgLogoURL = *p.OrgInfo.OrgLogoURL
 	}
 	if p.OrgInfo != nil && p.OrgInfo.OrgName != nil {
 		config.OrgName = *p.OrgInfo.OrgName
 	}
-	if p.ServerSettings != nil && p.ServerSettings.KolideServerURL != nil {
-		config.KolideServerURL = cleanupURL(*p.ServerSettings.KolideServerURL)
-	}
-	if p.ServerSettings != nil && p.ServerSettings.LiveQueryDisabled != nil {
-		config.LiveQueryDisabled = *p.ServerSettings.LiveQueryDisabled
+	if p.ServerSettings != nil {
+		if p.ServerSettings.ServerURL != nil {
+			config.ServerURL = cleanupURL(*p.ServerSettings.ServerURL)
+		}
+		if p.ServerSettings.LiveQueryDisabled != nil {
+			config.LiveQueryDisabled = *p.ServerSettings.LiveQueryDisabled
+		}
+		if p.ServerSettings.EnableAnalytics != nil {
+			config.EnableAnalytics = *p.ServerSettings.EnableAnalytics
+		}
 	}
 
 	if p.SSOSettings != nil {
@@ -172,30 +190,40 @@ func appConfigFromAppConfigPayload(p kolide.AppConfigPayload, config kolide.AppC
 	}
 
 	if settings := p.HostSettings; settings != nil {
-		if settings.AdditionalQueries != nil {
-			config.AdditionalQueries = settings.AdditionalQueries
+		config.AdditionalQueries = settings.AdditionalQueries
+		if settings.EnableHostUsers != nil {
+			config.EnableHostUsers = *settings.EnableHostUsers
 		}
+		if settings.EnableSoftwareInventory != nil {
+			config.EnableSoftwareInventory = *settings.EnableSoftwareInventory
+		}
+	} else {
+		config.AdditionalQueries = nil
 	}
 
-	populateSMTP := func(p *kolide.SMTPSettingsPayload) {
+	if p.AgentOptions != nil {
+		config.AgentOptions = p.AgentOptions
+	}
+
+	populateSMTP := func(p *fleet.SMTPSettingsPayload) {
 		if p.SMTPAuthenticationMethod != nil {
 			switch *p.SMTPAuthenticationMethod {
-			case kolide.AuthMethodNameCramMD5:
-				config.SMTPAuthenticationMethod = kolide.AuthMethodCramMD5
-			case kolide.AuthMethodNamePlain:
-				config.SMTPAuthenticationMethod = kolide.AuthMethodPlain
-			case kolide.AuthMethodNameLogin:
-				config.SMTPAuthenticationMethod = kolide.AuthMethodLogin
+			case fleet.AuthMethodNameCramMD5:
+				config.SMTPAuthenticationMethod = fleet.AuthMethodCramMD5
+			case fleet.AuthMethodNamePlain:
+				config.SMTPAuthenticationMethod = fleet.AuthMethodPlain
+			case fleet.AuthMethodNameLogin:
+				config.SMTPAuthenticationMethod = fleet.AuthMethodLogin
 			default:
 				panic("unknown SMTP AuthMethod: " + *p.SMTPAuthenticationMethod)
 			}
 		}
 		if p.SMTPAuthenticationType != nil {
 			switch *p.SMTPAuthenticationType {
-			case kolide.AuthTypeNameUserNamePassword:
-				config.SMTPAuthenticationType = kolide.AuthTypeUserNamePassword
-			case kolide.AuthTypeNameNone:
-				config.SMTPAuthenticationType = kolide.AuthTypeNone
+			case fleet.AuthTypeNameUserNamePassword:
+				config.SMTPAuthenticationType = fleet.AuthTypeUserNamePassword
+			case fleet.AuthTypeNameNone:
+				config.SMTPAuthenticationType = fleet.AuthTypeNone
 			default:
 				panic("unknown SMTP AuthType: " + *p.SMTPAuthenticationType)
 			}
@@ -241,27 +269,169 @@ func appConfigFromAppConfigPayload(p kolide.AppConfigPayload, config kolide.AppC
 	if p.SMTPSettings != nil {
 		populateSMTP(p.SMTPSettings)
 	}
+
+	if p.VulnerabilitySettings != nil {
+		config.VulnerabilityDatabasesPath = ptr.String(p.VulnerabilitySettings.DatabasesPath)
+	} else {
+		config.VulnerabilityDatabasesPath = nil
+	}
+
 	return &config
 }
 
-func (svc service) ApplyEnrollSecretSpec(ctx context.Context, spec *kolide.EnrollSecretSpec) error {
+func (svc *Service) ApplyEnrollSecretSpec(ctx context.Context, spec *fleet.EnrollSecretSpec) error {
+	if err := svc.authz.Authorize(ctx, &fleet.EnrollSecret{}, fleet.ActionWrite); err != nil {
+		return err
+	}
+
 	for _, s := range spec.Secrets {
-		if s.Name == "" {
-			return errors.New("enroll secret name must not be empty")
-		}
 		if s.Secret == "" {
 			return errors.New("enroll secret must not be empty")
 		}
 	}
 
-	return svc.ds.ApplyEnrollSecretSpec(spec)
+	return svc.ds.ApplyEnrollSecrets(nil, spec.Secrets)
 }
 
-func (svc service) GetEnrollSecretSpec(ctx context.Context) (*kolide.EnrollSecretSpec, error) {
-	return svc.ds.GetEnrollSecretSpec()
+func (svc *Service) GetEnrollSecretSpec(ctx context.Context) (*fleet.EnrollSecretSpec, error) {
+	if err := svc.authz.Authorize(ctx, &fleet.EnrollSecret{}, fleet.ActionRead); err != nil {
+		return nil, err
+	}
+
+	secrets, err := svc.ds.GetEnrollSecrets(nil)
+	if err != nil {
+		return nil, err
+	}
+	return &fleet.EnrollSecretSpec{Secrets: secrets}, nil
 }
 
-func (svc service) Version(ctx context.Context) (*version.Info, error) {
+func (svc *Service) Version(ctx context.Context) (*version.Info, error) {
+	if err := svc.authz.Authorize(ctx, &fleet.AppConfig{}, fleet.ActionRead); err != nil {
+		return nil, err
+	}
+
 	info := version.Version()
 	return &info, nil
+}
+
+func (svc *Service) License(ctx context.Context) (*fleet.LicenseInfo, error) {
+	if err := svc.authz.Authorize(ctx, &fleet.AppConfig{}, fleet.ActionRead); err != nil {
+		return nil, err
+	}
+
+	return &svc.license, nil
+}
+
+func (svc *Service) SetupRequired(ctx context.Context) (bool, error) {
+	users, err := svc.ds.ListUsers(fleet.UserListOptions{ListOptions: fleet.ListOptions{Page: 0, PerPage: 1}})
+	if err != nil {
+		return false, err
+	}
+	if len(users) == 0 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (svc *Service) LoggingConfig(ctx context.Context) (*fleet.Logging, error) {
+	if err := svc.authz.Authorize(ctx, &fleet.AppConfig{}, fleet.ActionRead); err != nil {
+		return nil, err
+	}
+	conf := svc.config
+	logging := &fleet.Logging{
+		Debug: conf.Logging.Debug,
+		Json:  conf.Logging.JSON,
+	}
+
+	switch conf.Osquery.StatusLogPlugin {
+	case "", "filesystem":
+		logging.Status = fleet.LoggingPlugin{
+			Plugin: "filesystem",
+			Config: fleet.FilesystemConfig{FilesystemConfig: conf.Filesystem},
+		}
+	case "kinesis":
+		logging.Status = fleet.LoggingPlugin{
+			Plugin: "kinesis",
+			Config: fleet.KinesisConfig{
+				Region:       conf.Kinesis.Region,
+				StatusStream: conf.Kinesis.StatusStream,
+				ResultStream: conf.Kinesis.ResultStream,
+			},
+		}
+	case "firehose":
+		logging.Status = fleet.LoggingPlugin{
+			Plugin: "firehose",
+			Config: fleet.FirehoseConfig{
+				Region:       conf.Firehose.Region,
+				StatusStream: conf.Firehose.StatusStream,
+				ResultStream: conf.Firehose.ResultStream,
+			},
+		}
+	case "lambda":
+		logging.Status = fleet.LoggingPlugin{
+			Plugin: "lambda",
+			Config: fleet.LambdaConfig{
+				Region:         conf.Lambda.Region,
+				StatusFunction: conf.Lambda.StatusFunction,
+				ResultFunction: conf.Lambda.ResultFunction,
+			},
+		}
+	case "pubsub":
+		logging.Status = fleet.LoggingPlugin{
+			Plugin: "pubsub",
+			Config: fleet.PubSubConfig{PubSubConfig: conf.PubSub},
+		}
+	case "stdout":
+		logging.Status = fleet.LoggingPlugin{Plugin: "stdout"}
+	default:
+		return nil, errors.Errorf("unrecognized logging plugin: %s", conf.Osquery.StatusLogPlugin)
+	}
+
+	switch conf.Osquery.ResultLogPlugin {
+	case "", "filesystem":
+		logging.Result = fleet.LoggingPlugin{
+			Plugin: "filesystem",
+			Config: fleet.FilesystemConfig{FilesystemConfig: conf.Filesystem},
+		}
+	case "kinesis":
+		logging.Result = fleet.LoggingPlugin{
+			Plugin: "kinesis",
+			Config: fleet.KinesisConfig{
+				Region:       conf.Kinesis.Region,
+				StatusStream: conf.Kinesis.StatusStream,
+				ResultStream: conf.Kinesis.ResultStream,
+			},
+		}
+	case "firehose":
+		logging.Result = fleet.LoggingPlugin{
+			Plugin: "firehose",
+			Config: fleet.FirehoseConfig{
+				Region:       conf.Firehose.Region,
+				StatusStream: conf.Firehose.StatusStream,
+				ResultStream: conf.Firehose.ResultStream,
+			},
+		}
+	case "lambda":
+		logging.Result = fleet.LoggingPlugin{
+			Plugin: "lambda",
+			Config: fleet.LambdaConfig{
+				Region:         conf.Lambda.Region,
+				StatusFunction: conf.Lambda.StatusFunction,
+				ResultFunction: conf.Lambda.ResultFunction,
+			},
+		}
+	case "pubsub":
+		logging.Result = fleet.LoggingPlugin{
+			Plugin: "pubsub",
+			Config: fleet.PubSubConfig{PubSubConfig: conf.PubSub},
+		}
+	case "stdout":
+		logging.Result = fleet.LoggingPlugin{
+			Plugin: "stdout",
+		}
+	default:
+		return nil, errors.Errorf("unrecognized logging plugin: %s", conf.Osquery.ResultLogPlugin)
+
+	}
+	return logging, nil
 }

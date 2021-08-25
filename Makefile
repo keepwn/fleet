@@ -2,7 +2,7 @@
 
 export GO111MODULE=on
 
-PATH := $(GOPATH)/bin:$(shell npm bin):$(PATH)
+PATH := $(shell npm bin):$(PATH)
 VERSION = $(shell git describe --tags --always --dirty)
 BRANCH = $(shell git rev-parse --abbrev-ref HEAD)
 REVISION = $(shell git rev-parse HEAD)
@@ -101,10 +101,10 @@ help:
 build: fleet fleetctl
 
 fleet: .prefix .pre-build .pre-fleet
-	CGO_ENABLED=0 go build -tags full -o build/${OUTPUT} -ldflags ${KIT_VERSION} ./cmd/fleet
+	CGO_ENABLED=1 go build -tags full,fts5,netgo -o build/${OUTPUT} -ldflags ${KIT_VERSION} ./cmd/fleet
 
 fleetctl: .prefix .pre-build .pre-fleetctl
-	CGO_ENABLED=0 go build -tags full -o build/fleetctl -ldflags ${KIT_VERSION} ./cmd/fleetctl
+	CGO_ENABLED=0 go build -tags full,fts5 -o build/fleetctl -ldflags ${KIT_VERSION} ./cmd/fleetctl
 
 lint-js:
 	yarn lint
@@ -115,10 +115,10 @@ lint-go:
 lint: lint-go lint-js
 
 test-go:
-	go test -tags full -parallel 8 ./...
+	go test -tags full,fts5,netgo -parallel 8 ./...
 
 analyze-go:
-	go test -tags full -race -cover ./...
+	go test -tags full,fts5,netgo -race -cover ./...
 
 test-js:
 	npm test
@@ -149,6 +149,9 @@ generate-dev: .prefix
 		frontend/templates/ assets/... server/mail/templates
 	NODE_ENV=development webpack --progress --colors --watch
 
+generate-mock: .prefix
+	go generate github.com/fleetdm/fleet/v4/server/mock
+
 deps: deps-js deps-go
 
 deps-js:
@@ -177,45 +180,63 @@ docker-push-release: docker-build-release
 	docker push fleetdm/fleet:${VERSION}
 	docker push fleetdm/fleet:latest
 
-docker-build-circle:
-	@echo ">> building docker image"
-	CGO_ENABLED=0 GOOS=linux go build -o build/linux/${OUTPUT} -ldflags ${KIT_VERSION} ./cmd/fleet
-	docker build -t "${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}" .
-	docker push "${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}"
-
 .pre-binary-bundle:
 	rm -rf build/binary-bundle
 	mkdir -p build/binary-bundle/linux
 	mkdir -p build/binary-bundle/darwin
 
 xp-fleet: .pre-binary-bundle .pre-fleet generate
-	CGO_ENABLED=0 GOOS=linux go build -tags full -o build/binary-bundle/linux/fleet -ldflags ${KIT_VERSION} ./cmd/fleet
-	CGO_ENABLED=0 GOOS=darwin go build -tags full -o build/binary-bundle/darwin/fleet -ldflags ${KIT_VERSION} ./cmd/fleet
-	CGO_ENABLED=0 GOOS=windows go build -tags full -o build/binary-bundle/windows/fleet.exe -ldflags ${KIT_VERSION} ./cmd/fleet
+	CGO_ENABLED=1 GOOS=linux go build -tags full,fts5,netgo -trimpath -o build/binary-bundle/linux/fleet -ldflags ${KIT_VERSION} ./cmd/fleet
+	CGO_ENABLED=1 GOOS=darwin go build -tags full,fts5,netgo -trimpath -o build/binary-bundle/darwin/fleet -ldflags ${KIT_VERSION} ./cmd/fleet
+	CGO_ENABLED=1 GOOS=windows go build -tags full,fts5,netgo -trimpath -o build/binary-bundle/windows/fleet.exe -ldflags ${KIT_VERSION} ./cmd/fleet
 
 xp-fleetctl: .pre-binary-bundle .pre-fleetctl generate-go
-	CGO_ENABLED=0 GOOS=linux go build -tags full -o build/binary-bundle/linux/fleetctl -ldflags ${KIT_VERSION} ./cmd/fleetctl
-	CGO_ENABLED=0 GOOS=darwin go build -tags full -o build/binary-bundle/darwin/fleetctl -ldflags ${KIT_VERSION} ./cmd/fleetctl
-	CGO_ENABLED=0 GOOS=windows go build -tags full -o build/binary-bundle/windows/fleetctl.exe -ldflags ${KIT_VERSION} ./cmd/fleetctl
+	CGO_ENABLED=0 GOOS=linux go build -tags full,fts5 -trimpath -o build/binary-bundle/linux/fleetctl -ldflags ${KIT_VERSION} ./cmd/fleetctl
+	CGO_ENABLED=0 GOOS=darwin go build -tags full,fts5 -trimpath -o build/binary-bundle/darwin/fleetctl -ldflags ${KIT_VERSION} ./cmd/fleetctl
+	CGO_ENABLED=0 GOOS=windows go build -tags full,fts5 -trimpath -o build/binary-bundle/windows/fleetctl.exe -ldflags ${KIT_VERSION} ./cmd/fleetctl
 
 binary-bundle: xp-fleet xp-fleetctl
 	cd build/binary-bundle && zip -r fleet.zip darwin/ linux/ windows/
-	cd build/binary-bundle && mkdir fleetctl-macos && cp darwin/fleetctl fleetctl-macos && tar -czf fleetctl-macos.tar.gz fleetctl-macos 
-	cd build/binary-bundle && mkdir fleetctl-linux && cp linux/fleetctl fleetctl-linux && tar -czf fleetctl-linux.tar.gz fleetctl-linux 
+	cd build/binary-bundle && mkdir fleetctl-macos && cp darwin/fleetctl fleetctl-macos && tar -czf fleetctl-macos.tar.gz fleetctl-macos
+	cd build/binary-bundle && mkdir fleetctl-linux && cp linux/fleetctl fleetctl-linux && tar -czf fleetctl-linux.tar.gz fleetctl-linux
 	cd build/binary-bundle && mkdir fleetctl-windows && cp windows/fleetctl.exe fleetctl-windows && tar -czf fleetctl-windows.tar.gz fleetctl-windows
-	cd build/binary-bundle && cp windows/fleetctl.exe . && zip fleetctl.exe.zip fleetctl.exe 
+	cd build/binary-bundle && cp windows/fleetctl.exe . && zip fleetctl.exe.zip fleetctl.exe
 	cd build/binary-bundle && shasum -a 256 fleet.zip fleetctl.exe.zip fleetctl-macos.tar.gz fleetctl-windows.tar.gz fleetctl-linux.tar.gz
+
+
+.pre-binary-arch:
+ifndef GOOS
+	@echo "GOOS is Empty. Try use to see valid GOOS/GOARCH platform: go tool dist list. Ex.: make binary-arch GOOS=linux GOARCH=arm64"
+	@exit 1;
+endif
+ifndef GOARCH
+	@echo "GOARCH is Empty. Try use to see valid GOOS/GOARCH platform: go tool dist list. Ex.: make binary-arch GOOS=linux GOARCH=arm64"
+	@exit 1;
+endif
+
+
+binary-arch: .pre-binary-arch .pre-binary-bundle .pre-fleet
+	mkdir -p build/binary-bundle/${GOARCH}-${GOOS}
+	CGO_ENABLED=1 GOARCH=${GOARCH} GOOS=${GOOS} go build -tags full,fts5,netgo -o build/binary-bundle/${GOARCH}-${GOOS}/fleet -ldflags ${KIT_VERSION} ./cmd/fleet
+	CGO_ENABLED=0 GOARCH=${GOARCH} GOOS=${GOOS} go build -tags full,fts5,netgo -o build/binary-bundle/${GOARCH}-${GOOS}/fleetctl -ldflags ${KIT_VERSION} ./cmd/fleetctl
+	cd build/binary-bundle/${GOARCH}-${GOOS} && tar -czf fleetctl-${GOARCH}-${GOOS}.tar.gz fleetctl fleet
+
 
 # Drop, create, and migrate the e2e test database
 e2e-reset-db:
 	docker-compose exec -T mysql_test bash -c 'echo "drop database if exists e2e; create database e2e;" | mysql -uroot -ptoor'
-	./build/fleet prepare db --mysql_address=localhost:3307  --mysql_username=root --mysql_password=toor --auth_jwt_key=insecure --mysql_database=e2e 
+	./build/fleet prepare db --mysql_address=localhost:3307  --mysql_username=root --mysql_password=toor --mysql_database=e2e
 
 e2e-setup:
-	./build/fleetctl config set --context e2e --address https://localhost:8642
-	./build/fleetctl config set --context e2e --tls-skip-verify true
-	./build/fleetctl setup --context e2e --email=test@example.com --username=test --password=admin123# --org-name='Fleet Test'
-	./build/fleetctl user create --context e2e --username=user1 --email=user1@example.com --sso=true
+	./build/fleetctl config set --context e2e --address https://localhost:8642 --tls-skip-verify true
+	./build/fleetctl setup --context e2e --email=admin@example.com --password=user123# --org-name='Fleet Test' --name Admin
+	./build/fleetctl user create --context e2e --email=maintainer@example.com --name maintainer --password=user123# --global-role=maintainer
+	./build/fleetctl user create --context e2e --email=observer@example.com --name observer --password=user123# --global-role=observer
+	./build/fleetctl user create --context e2e --email=sso_user@example.com --name "SSO user" --sso=true
 
-e2e-serve:
-	./build/fleet serve --mysql_address=localhost:3307 --mysql_username=root --mysql_password=toor --auth_jwt_key=insecure --mysql_database=e2e --server_address=localhost:8642
+e2e-serve-core:
+	FLEET_SOFTWARE_INVENTORY=1 ./build/fleet serve --mysql_address=localhost:3307 --mysql_username=root --mysql_password=toor --mysql_database=e2e --server_address=0.0.0.0:8642 
+
+e2e-serve-basic:
+	FLEET_SOFTWARE_INVENTORY=1 ./build/fleet serve  --dev_license --mysql_address=localhost:3307 --mysql_username=root --mysql_password=toor --mysql_database=e2e --server_address=0.0.0.0:8642
+
