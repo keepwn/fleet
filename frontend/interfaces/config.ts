@@ -37,6 +37,10 @@ export default PropTypes.shape({
   expiration: PropTypes.string,
   note: PropTypes.string,
   // vulnerability_settings: PropTypes.any, TODO
+  enable_host_status_webhook: PropTypes.bool,
+  destination_url: PropTypes.string,
+  host_percentage: PropTypes.number,
+  days_count: PropTypes.number,
   logging: PropTypes.shape({
     debug: PropTypes.bool,
     json: PropTypes.bool,
@@ -90,12 +94,18 @@ export interface IConfig {
   host_expiry_enabled: boolean;
   host_expiry_window: number;
   agent_options: string;
+  osquery_detail: number;
+  osquery_policy: number;
   tier: string;
   organization: string;
   device_count: number;
   expiration: string;
   note: string;
   // vulnerability_settings: any; TODO
+  enable_host_status_webhook: boolean;
+  destination_url: string;
+  host_percentage: number;
+  days_count: number;
   logging: {
     debug: boolean;
     json: boolean;

@@ -2,7 +2,6 @@ package osquery_utils
 
 import (
 	"encoding/json"
-	"os"
 	"sort"
 	"testing"
 	"time"
@@ -276,7 +275,7 @@ func sortedKeysCompare(t *testing.T, m map[string]DetailQuery, expectedKeys []st
 
 func TestGetDetailQueries(t *testing.T) {
 	queriesNoConfig := GetDetailQueries(nil)
-	require.Len(t, queriesNoConfig, 7)
+	require.Len(t, queriesNoConfig, 9)
 	baseQueries := []string{
 		"network_interface",
 		"os_version",
@@ -285,19 +284,17 @@ func TestGetDetailQueries(t *testing.T) {
 		"scheduled_query_stats",
 		"system_info",
 		"uptime",
+		"disk_space_unix",
+		"disk_space_windows",
 	}
 	sortedKeysCompare(t, queriesNoConfig, baseQueries)
 
-	queriesWithUsers := GetDetailQueries(&fleet.AppConfig{EnableHostUsers: true})
-	require.Len(t, queriesWithUsers, 8)
+	queriesWithUsers := GetDetailQueries(&fleet.AppConfig{HostSettings: fleet.HostSettings{EnableHostUsers: true}})
+	require.Len(t, queriesWithUsers, 10)
 	sortedKeysCompare(t, queriesWithUsers, append(baseQueries, "users"))
 
-	require.NoError(t, os.Setenv("FLEET_BETA_SOFTWARE_INVENTORY", "1"))
-
-	queriesWithUsersAndSoftware := GetDetailQueries(&fleet.AppConfig{EnableHostUsers: true})
-	require.Len(t, queriesWithUsersAndSoftware, 11)
+	queriesWithUsersAndSoftware := GetDetailQueries(&fleet.AppConfig{HostSettings: fleet.HostSettings{EnableHostUsers: true, EnableSoftwareInventory: true}})
+	require.Len(t, queriesWithUsersAndSoftware, 13)
 	sortedKeysCompare(t, queriesWithUsersAndSoftware,
 		append(baseQueries, "users", "software_macos", "software_linux", "software_windows"))
-
-	require.NoError(t, os.Setenv("FLEET_BETA_SOFTWARE_INVENTORY", ""))
 }

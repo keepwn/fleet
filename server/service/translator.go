@@ -2,10 +2,8 @@ package service
 
 import (
 	"context"
-	"net/http"
 
 	"github.com/fleetdm/fleet/v4/server/fleet"
-	kithttp "github.com/go-kit/kit/transport/http"
 )
 
 type translatorRequest struct {
@@ -19,14 +17,6 @@ type translatorResponse struct {
 
 func (r translatorResponse) error() error { return r.Err }
 
-func makeTranslatorEndpoint(svc fleet.Service, opts []kithttp.ServerOption) http.Handler {
-	return newServer(
-		makeAuthenticatedServiceEndpoint(svc, translatorEndpoint),
-		makeDecoder(translatorRequest{}),
-		opts,
-	)
-}
-
 func translatorEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (interface{}, error) {
 	req := request.(*translatorRequest)
 	resp, err := svc.Translate(ctx, req.List)
@@ -36,34 +26,34 @@ func translatorEndpoint(ctx context.Context, request interface{}, svc fleet.Serv
 	return translatorResponse{List: resp}, nil
 }
 
-type translateFunc func(ds fleet.Datastore, identifier string) (uint, error)
+type translateFunc func(ctx context.Context, ds fleet.Datastore, identifier string) (uint, error)
 
-func translateEmailToUserID(ds fleet.Datastore, identifier string) (uint, error) {
-	user, err := ds.UserByEmail(identifier)
+func translateEmailToUserID(ctx context.Context, ds fleet.Datastore, identifier string) (uint, error) {
+	user, err := ds.UserByEmail(ctx, identifier)
 	if err != nil {
 		return 0, err
 	}
 	return user.ID, nil
 }
 
-func translateLabelToID(ds fleet.Datastore, identifier string) (uint, error) {
-	labelIDs, err := ds.LabelIDsByName([]string{identifier})
+func translateLabelToID(ctx context.Context, ds fleet.Datastore, identifier string) (uint, error) {
+	labelIDs, err := ds.LabelIDsByName(ctx, []string{identifier})
 	if err != nil {
 		return 0, err
 	}
 	return labelIDs[0], nil
 }
 
-func translateTeamToID(ds fleet.Datastore, identifier string) (uint, error) {
-	team, err := ds.TeamByName(identifier)
+func translateTeamToID(ctx context.Context, ds fleet.Datastore, identifier string) (uint, error) {
+	team, err := ds.TeamByName(ctx, identifier)
 	if err != nil {
 		return 0, err
 	}
 	return team.ID, nil
 }
 
-func translateHostToID(ds fleet.Datastore, identifier string) (uint, error) {
-	host, err := ds.HostByIdentifier(identifier)
+func translateHostToID(ctx context.Context, ds fleet.Datastore, identifier string) (uint, error) {
+	host, err := ds.HostByIdentifier(ctx, identifier)
 	if err != nil {
 		return 0, err
 	}
@@ -101,7 +91,7 @@ func (svc Service) Translate(ctx context.Context, payloads []fleet.TranslatePayl
 			return nil, fleet.NewErrorf(fleet.ErrNoUnknownTranslate, "Type %s is unknown.", payload.Type)
 		}
 
-		id, err := translateFunc(svc.ds, payload.Payload.Identifier)
+		id, err := translateFunc(ctx, svc.ds, payload.Payload.Identifier)
 		if err != nil {
 			return nil, err
 		}

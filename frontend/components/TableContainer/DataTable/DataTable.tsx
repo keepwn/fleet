@@ -1,13 +1,28 @@
 import React, { useMemo, useEffect, useCallback, useContext } from "react";
 import { TableContext } from "context/table";
 import PropTypes from "prop-types";
-import { useTable, useSortBy, useRowSelect } from "react-table";
+import classnames from "classnames";
+import {
+  useTable,
+  useSortBy,
+  useRowSelect,
+  Row,
+  usePagination,
+  useFilters,
+} from "react-table";
 import { isString, kebabCase, noop } from "lodash";
+import { useDebouncedCallback } from "use-debounce/lib";
 
-import useDeepEffect from "utilities/hooks/useDeepEffect";
+import { useDeepEffect } from "utilities/hooks";
+import sort from "utilities/sort";
+import { AppContext } from "context/app";
 
-import Spinner from "components/loaders/Spinner";
-import Button from "../../buttons/Button";
+import Button from "components/buttons/Button";
+// @ts-ignore
+import FleetIcon from "components/icons/FleetIcon";
+import Spinner from "components/Spinner";
+import { ButtonVariant } from "components/buttons/Button/Button";
+// @ts-ignore
 import ActionButton, { IActionButtonProps } from "./ActionButton";
 
 const baseClass = "data-table-container";
@@ -20,17 +35,28 @@ interface IDataTableProps {
   sortHeader: any;
   sortDirection: any;
   onSort: any; // TODO: an event type
+  disableMultiRowSelect: boolean;
   showMarkAllPages: boolean;
   isAllPagesSelected: boolean; // TODO: make dependent on showMarkAllPages
   toggleAllPagesSelected?: any; // TODO: an event type and make it dependent on showMarkAllPages
   resultsTitle: string;
   defaultPageSize: number;
-  primarySelectActionButtonVariant?: string;
+  primarySelectActionButtonVariant?: ButtonVariant;
   primarySelectActionButtonIcon?: string;
   primarySelectActionButtonText?: string | ((targetIds: number[]) => string);
-  onPrimarySelectActionClick: any; // TODO: an event type
+  onPrimarySelectActionClick: any; // figure out type
   secondarySelectActions?: IActionButtonProps[];
+  onSelectSingleRow?: (value: Row) => void;
+  onResultsCountChange?: (value: number) => void;
+  isClientSidePagination?: boolean;
+  isClientSideFilter?: boolean;
+  highlightOnHover?: boolean;
+  searchQuery?: string;
+  searchQueryColumn?: string;
+  selectedDropdownFilter?: string;
 }
+
+const CLIENT_SIDE_DEFAULT_PAGE_SIZE = 20;
 
 // This data table uses react-table for implementation. The relevant documentation of the library
 // can be found here https://react-table.tanstack.com/docs/api/useTable
@@ -42,6 +68,7 @@ const DataTable = ({
   sortHeader,
   sortDirection,
   onSort,
+  disableMultiRowSelect,
   showMarkAllPages,
   isAllPagesSelected,
   toggleAllPagesSelected,
@@ -52,8 +79,17 @@ const DataTable = ({
   onPrimarySelectActionClick,
   primarySelectActionButtonText,
   secondarySelectActions,
+  onSelectSingleRow,
+  isClientSidePagination,
+  isClientSideFilter,
+  highlightOnHover,
+  searchQuery,
+  searchQueryColumn,
+  selectedDropdownFilter,
+  onResultsCountChange,
 }: IDataTableProps): JSX.Element => {
   const { resetSelectedRows } = useContext(TableContext);
+  const { isOnlyObserver } = useContext(AppContext);
 
   const columns = useMemo(() => {
     return tableColumns;
@@ -72,6 +108,19 @@ const DataTable = ({
     toggleAllRowsSelected,
     isAllRowsSelected,
     state: tableState,
+    page, // Instead of using 'rows', we'll use page,
+    // which has only the rows for the active page
+
+    // The rest of these things are super handy, too ;)
+    canPreviousPage,
+    canNextPage,
+    // pageOptions,
+    // pageCount,
+    // gotoPage,
+    nextPage,
+    previousPage,
+    setPageSize,
+    setFilter,
   } = useTable(
     {
       columns,
@@ -96,22 +145,55 @@ const DataTable = ({
             valueB = isString(valueB) ? valueB.toLowerCase() : valueB;
 
             if (valueB > valueA) {
-              return 1;
+              return -1;
             }
             if (valueB < valueA) {
-              return -1;
+              return 1;
             }
             return 0;
           },
+          dateStrings: (a: any, b: any, id: any) =>
+            sort.dateStringsAsc(a.values[id], b.values[id]),
         }),
         []
       ),
     },
+    useFilters,
     useSortBy,
+    usePagination,
     useRowSelect
   );
 
   const { sortBy, selectedRowIds } = tableState;
+
+  // Listen for changes to filters if clientSideFilter is enabled
+
+  const setDebouncedClientFilter = useDebouncedCallback(
+    (column: string, query: string) => {
+      setFilter(column, query);
+    },
+    300
+  );
+
+  useEffect(() => {
+    if (isClientSideFilter && onResultsCountChange) {
+      onResultsCountChange(rows.length);
+    }
+  }, [isClientSideFilter, onResultsCountChange, rows.length]);
+
+  useEffect(() => {
+    if (isClientSideFilter && searchQueryColumn) {
+      setDebouncedClientFilter(searchQueryColumn, searchQuery || "");
+    }
+  }, [searchQuery, searchQueryColumn]);
+
+  useEffect(() => {
+    if (isClientSideFilter && selectedDropdownFilter) {
+      selectedDropdownFilter === "all"
+        ? setDebouncedClientFilter("platforms", "")
+        : setDebouncedClientFilter("platforms", selectedDropdownFilter);
+    }
+  }, [selectedDropdownFilter]);
 
   // This is used to listen for changes to sort. If there is a change
   // Then the sortHandler change is fired.
@@ -133,7 +215,11 @@ const DataTable = ({
     if (isAllPagesSelected) {
       toggleAllRowsSelected(true);
     }
-  }, [isAllPagesSelected]);
+  }, [isAllPagesSelected, toggleAllRowsSelected]);
+
+  useEffect(() => {
+    setPageSize(CLIENT_SIDE_DEFAULT_PAGE_SIZE);
+  }, [setPageSize]);
 
   useDeepEffect(() => {
     if (
@@ -151,12 +237,27 @@ const DataTable = ({
   const onClearSelectionClick = useCallback(() => {
     toggleAllRowsSelected(false);
     toggleAllPagesSelected(false);
-  }, [toggleAllRowsSelected]);
+  }, [toggleAllPagesSelected, toggleAllRowsSelected]);
+
+  const onSingleRowClick = useCallback(
+    (row) => {
+      if (disableMultiRowSelect) {
+        row.toggleRowSelected();
+        onSelectSingleRow && onSelectSingleRow(row);
+        toggleAllRowsSelected(false);
+      }
+    },
+    [disableMultiRowSelect, onSelectSingleRow, toggleAllRowsSelected]
+  );
 
   const renderSelectedCount = (): JSX.Element => {
     return (
       <p>
-        <span>{selectedFlatRows.length}</span> selected
+        <span>
+          {selectedFlatRows.length}
+          {isAllPagesSelected && "+"}
+        </span>{" "}
+        selected
       </p>
     );
   };
@@ -239,15 +340,33 @@ const DataTable = ({
     showMarkAllPages &&
     !isAllPagesSelected;
 
+  const pageOrRows = isClientSidePagination ? page : rows;
+
+  const previousButton = (
+    <>
+      <FleetIcon name="chevronleft" /> Previous
+    </>
+  );
+  const nextButton = (
+    <>
+      Next <FleetIcon name="chevronright" />
+    </>
+  );
+
+  const tableStyles = classnames({
+    "data-table__table": true,
+    "is-observer": isOnlyObserver,
+  });
+
   return (
     <div className={baseClass}>
+      {isLoading && (
+        <div className={"loading-overlay"}>
+          <Spinner />
+        </div>
+      )}
       <div className={"data-table data-table__wrapper"}>
-        {isLoading && (
-          <div className={"loading-overlay"}>
-            <Spinner />
-          </div>
-        )}
-        <table className={"data-table__table"}>
+        <table className={tableStyles}>
           {Object.keys(selectedRowIds).length !== 0 && (
             <thead className={"active-selection"}>
               <tr {...headerGroups[0].getHeaderGroupProps()}>
@@ -293,21 +412,44 @@ const DataTable = ({
             {headerGroups.map((headerGroup) => (
               <tr {...headerGroup.getHeaderGroupProps()}>
                 {headerGroup.headers.map((column) => (
-                  <th {...column.getHeaderProps(column.getSortByToggleProps())}>
-                    {column.render("Header")}
+                  <th
+                    className={column.id ? `${column.id}__header` : ""}
+                    {...column.getHeaderProps(column.getSortByToggleProps())}
+                  >
+                    <div>{column.render("Header")}</div>
                   </th>
                 ))}
               </tr>
             ))}
           </thead>
           <tbody>
-            {rows.map((row) => {
+            {pageOrRows.map((row: any) => {
               prepareRow(row);
+
+              const rowStyles = classnames({
+                "single-row": disableMultiRowSelect,
+                "highlight-on-hover": highlightOnHover,
+              });
               return (
-                <tr {...row.getRowProps()}>
-                  {row.cells.map((cell) => {
+                <tr
+                  className={rowStyles}
+                  {...row.getRowProps({
+                    // @ts-ignore // TS complains about prop not existing
+                    onClick: () => {
+                      disableMultiRowSelect && onSingleRowClick(row);
+                    },
+                  })}
+                >
+                  {row.cells.map((cell: any) => {
                     return (
-                      <td {...cell.getCellProps()}>{cell.render("Cell")}</td>
+                      <td
+                        className={
+                          cell.column.id ? `${cell.column.id}__cell` : ""
+                        }
+                        {...cell.getCellProps()}
+                      >
+                        {cell.render("Cell")}
+                      </td>
                     );
                   })}
                 </tr>
@@ -316,6 +458,24 @@ const DataTable = ({
           </tbody>
         </table>
       </div>
+      {isClientSidePagination && (
+        <div className={`${baseClass}__pagination`}>
+          <Button
+            variant="unstyled"
+            onClick={() => previousPage()}
+            disabled={!canPreviousPage}
+          >
+            {previousButton}
+          </Button>
+          <Button
+            variant="unstyled"
+            onClick={() => nextPage()}
+            disabled={!canNextPage}
+          >
+            {nextButton}
+          </Button>
+        </div>
+      )}
     </div>
   );
 };

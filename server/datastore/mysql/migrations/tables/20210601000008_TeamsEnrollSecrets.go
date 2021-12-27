@@ -38,6 +38,7 @@ func Up_20210601000008(tx *sql.Tx) error {
 	//}
 	// ********* TEST ONLY ENDS  *********
 
+	//nolint
 	rows, err := tx.Query(`SELECT secret, count(secret) FROM enroll_secrets GROUP BY secret HAVING count(secret) > 1`)
 	if err != nil {
 		return errors.Wrap(err, "remove duplicate secrets")
@@ -70,7 +71,7 @@ func Up_20210601000008(tx *sql.Tx) error {
 		ALTER TABLE enroll_secrets
 		DROP COLUMN active,
 		DROP COLUMN name,
-		ADD UNIQUE INDEX (secret)
+		ADD PRIMARY KEY (secret)
 	`
 	if _, err := tx.Exec(sql); err != nil {
 		return errors.Wrap(err, "alter enroll_secrets")

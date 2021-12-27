@@ -1,7 +1,11 @@
 describe("Setup", () => {
   // Different than normal beforeEach because we don't run the fleetctl setup.
   beforeEach(() => {
-    cy.exec("make e2e-reset-db", { timeout: 5000 });
+    const SHELL = Cypress.platform === "win32" ? "cmd" : "bash";
+    cy.exec("make e2e-reset-db", {
+      timeout: 5000,
+      env: { SHELL },
+    });
   });
 
   it("Completes setup", () => {
@@ -30,10 +34,10 @@ describe("Setup", () => {
     cy.contains("button:enabled", /next/i).click();
 
     // Page 3
-    cy.contains("button:enabled", /submit/i).click();
+    cy.contains("button:enabled", /next/i).click();
 
     // Page 4
-    cy.contains("button:enabled", /finish/i).click();
+    cy.contains("button:enabled", /confirm/i).click();
 
     cy.url().should("match", /\/hosts\/manage$/i);
     cy.contains(/all hosts/i);

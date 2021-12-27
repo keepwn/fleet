@@ -14,15 +14,14 @@
       margin: 0;
       font-size: $x-small;
     }
-
   }
-  
+
   &__learn-more {
     color: $core-vibrant-blue;
     font-size: $x-small;
     font-weight: $bold;
     text-decoration: none;
-    
+
     &--inline {
       margin-left: $pad-medium;
     }
@@ -32,7 +31,6 @@
       margin-left: $pad-small;
     }
   }
-
 
   &__enroll-secret-label {
     font-size: 15px;
@@ -125,7 +123,7 @@
   &__inputs {
     width: 60%;
     float: left;
-    padding: 0 $pad-xxlarge 0 0;
+    padding-right: $pad-small;
     box-sizing: border-box;
 
     .input-field {
@@ -154,11 +152,15 @@
     &--usage {
       margin-top: 24px;
     }
+    &--webhook {
+      margin-bottom: 24px;
+    }
   }
 
   &__details {
     float: right;
     width: 40%;
+    height: 87px;
 
     .icon-tooltip {
       margin: $pad-xlarge 0;
@@ -195,27 +197,6 @@
 
   &__smtp-section {
     @include clearfix;
-
-    .slide-wrapper {
-      .slider-option {
-        font-size: 18px;
-        font-weight: $regular;
-        text-align: left;
-        vertical-align: text-bottom;
-
-        &--off {
-          color: $core-fleet-blue;
-        }
-
-        &--on {
-          color: $core-vibrant-blue;
-        }
-      }
-
-      .button {
-        margin: 0 10px;
-      }
-    }
   }
 
   &__component-label {
@@ -224,14 +205,67 @@
   }
 
   &__yaml {
-    width: calc(100% - 2px); // because the outline extended beyond the sticky page description
+    width: calc(
+      100% - 2px
+    ); // because the outline extended beyond the sticky page description
   }
 
-  &__usage-stats-preview-modal {
+  &__usage-stats-preview-modal,
+  &__host-status-webhook-preview-modal {
     .flex-end {
       margin-top: 20px;
       display: flex;
       justify-content: flex-end;
+    }
+  }
+
+  &__advanced-options {
+    margin-bottom: $pad-large;
+
+    .tooltip-wrap {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      margin-bottom: $pad-large;
+
+      .icon-tooltip {
+        span {
+          display: flex;
+          align-items: center;
+        }
+        p {
+          text-align: center;
+        }
+      }
+
+      .form-field--input {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        margin-right: $pad-small;
+        margin-bottom: 0;
+      }
+
+      .form-field--checkbox {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        margin-right: $pad-small;
+        margin-bottom: 0;
+
+        .fleet-checkbox {
+          display: flex;
+          align-items: center;
+        }
+      }
+    }
+
+    .tooltip-wrap--input {
+      .icon-tooltip {
+        span {
+          margin-top: 22px;
+        }
+      }
     }
   }
 }

@@ -20,7 +20,7 @@ export class PackComposerPage extends Component {
     serverErrors: PropTypes.shape({
       base: PropTypes.string,
     }),
-    isBasicTier: PropTypes.bool,
+    isPremiumTier: PropTypes.bool,
   };
 
   static defaultProps = {
@@ -41,37 +41,39 @@ export class PackComposerPage extends Component {
     return false;
   };
 
-  visitPackPage = (packID) => {
-    const { dispatch } = this.props;
-
-    dispatch(push(PATHS.PACK({ id: packID })));
-
-    return false;
-  };
-
   handleSubmit = (formData) => {
     const { create } = packActions;
     const { dispatch } = this.props;
-    const { visitPackPage } = this;
 
     return dispatch(create(formData))
       .then((pack) => {
         const { id: packID } = pack;
-
-        return visitPackPage(packID);
+        dispatch(push(PATHS.PACK(packID)));
+        dispatch(
+          renderFlash(
+            "success",
+            "Pack successfully created. Add queries to your pack."
+          )
+        );
       })
-      .then(() => {
-        dispatch(renderFlash("success", `Pack successfully created.`));
-      })
-      .catch(() => {
-        dispatch(renderFlash("error", "Unable to create pack."));
+      .catch((response) => {
+        if (response.base.slice(0, 27) === "Error 1062: Duplicate entry") {
+          dispatch(
+            renderFlash(
+              "error",
+              "Unable to create pack. Pack names must be unique."
+            )
+          );
+        } else {
+          dispatch(renderFlash("error", "Unable to create pack."));
+        }
       });
   };
 
   render() {
     const { handleSubmit, onFetchTargets } = this;
     const { selectedTargetsCount } = this.state;
-    const { serverErrors, isBasicTier } = this.props;
+    const { serverErrors, isPremiumTier } = this.props;
 
     return (
       <div className="has-sidebar">
@@ -81,7 +83,7 @@ export class PackComposerPage extends Component {
           onFetchTargets={onFetchTargets}
           selectedTargetsCount={selectedTargetsCount}
           serverErrors={serverErrors}
-          isBasicTier={isBasicTier}
+          isPremiumTier={isPremiumTier}
         />
         <PackInfoSidePanel />
       </div>
@@ -91,9 +93,9 @@ export class PackComposerPage extends Component {
 
 const mapStateToProps = (state) => {
   const { errors: serverErrors } = state.entities.packs;
-  const isBasicTier = permissionUtils.isBasicTier(state.app.config);
+  const isPremiumTier = permissionUtils.isPremiumTier(state.app.config);
 
-  return { serverErrors, isBasicTier };
+  return { serverErrors, isPremiumTier };
 };
 
 export default connect(mapStateToProps)(PackComposerPage);

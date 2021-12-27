@@ -2,6 +2,8 @@ package s3
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"strings"
@@ -9,8 +11,8 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/fleet"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -30,23 +32,23 @@ func (d *Datastore) generateS3Key(metadata *fleet.CarveMetadata) string {
 }
 
 // NewCarve initializes a new file carving session
-func (d *Datastore) NewCarve(metadata *fleet.CarveMetadata) (*fleet.CarveMetadata, error) {
+func (d *Datastore) NewCarve(ctx context.Context, metadata *fleet.CarveMetadata) (*fleet.CarveMetadata, error) {
 	objectKey := d.generateS3Key(metadata)
 	res, err := d.s3client.CreateMultipartUpload(&s3.CreateMultipartUploadInput{
 		Bucket: &d.bucket,
 		Key:    &objectKey,
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "s3 multipart carve create")
+		return nil, ctxerr.Wrap(ctx, err, "s3 multipart carve create")
 	}
 	metadata.SessionId = *res.UploadId
-	return d.metadatadb.NewCarve(metadata)
+	return d.metadatadb.NewCarve(ctx, metadata)
 }
 
 // UpdateCarve updates carve definition in database
 // Only max_block and expired are updatable
-func (d *Datastore) UpdateCarve(metadata *fleet.CarveMetadata) error {
-	return d.metadatadb.UpdateCarve(metadata)
+func (d *Datastore) UpdateCarve(ctx context.Context, metadata *fleet.CarveMetadata) error {
+	return d.metadatadb.UpdateCarve(ctx, metadata)
 }
 
 // listS3Carves lists all keys up to a given one or if the passed max number
@@ -88,29 +90,29 @@ func (d *Datastore) listS3Carves(lastPrefix string, maxKeys int) (map[string]boo
 // lifecycle configurations provided by AWS. This will compare a portion of the
 // metadata present in the database and mark as expired the carves no longer
 // available in S3 (ignores the `now` argument)
-func (d *Datastore) CleanupCarves(now time.Time) (int, error) {
+func (d *Datastore) CleanupCarves(ctx context.Context, now time.Time) (int, error) {
 	var err error
 	// Get the 1000 oldest carves
-	nonExpiredCarves, err := d.ListCarves(fleet.CarveListOptions{
+	nonExpiredCarves, err := d.ListCarves(ctx, fleet.CarveListOptions{
 		ListOptions: fleet.ListOptions{PerPage: cleanupSize},
 		Expired:     false,
 	})
 	if err != nil {
-		return 0, errors.Wrap(err, "s3 carve cleanup")
+		return 0, ctxerr.Wrap(ctx, err, "s3 carve cleanup")
 	}
 	// List carves in S3 up to a hour+1 prefix
 	lastCarveNextHour := nonExpiredCarves[len(nonExpiredCarves)-1].CreatedAt.Add(time.Hour)
 	lastCarvePrefix := d.prefix + lastCarveNextHour.Format(timePrefixFormat)
 	carveKeys, err := d.listS3Carves(lastCarvePrefix, 2*cleanupSize)
 	if err != nil {
-		return 0, errors.Wrap(err, "s3 carve cleanup")
+		return 0, ctxerr.Wrap(ctx, err, "s3 carve cleanup")
 	}
 	// Compare carve metadata in DB with S3 listing and update expiration flag
 	cleanCount := 0
 	for _, carve := range nonExpiredCarves {
 		if _, ok := carveKeys[d.generateS3Key(carve)]; !ok {
 			carve.Expired = true
-			err = d.UpdateCarve(carve)
+			err = d.UpdateCarve(ctx, carve)
 			cleanCount++
 		}
 	}
@@ -118,23 +120,23 @@ func (d *Datastore) CleanupCarves(now time.Time) (int, error) {
 }
 
 // Carve returns carve metadata by ID
-func (d *Datastore) Carve(carveID int64) (*fleet.CarveMetadata, error) {
-	return d.metadatadb.Carve(carveID)
+func (d *Datastore) Carve(ctx context.Context, carveID int64) (*fleet.CarveMetadata, error) {
+	return d.metadatadb.Carve(ctx, carveID)
 }
 
 // CarveBySessionId returns carve metadata by session ID
-func (d *Datastore) CarveBySessionId(sessionID string) (*fleet.CarveMetadata, error) {
-	return d.metadatadb.CarveBySessionId(sessionID)
+func (d *Datastore) CarveBySessionId(ctx context.Context, sessionID string) (*fleet.CarveMetadata, error) {
+	return d.metadatadb.CarveBySessionId(ctx, sessionID)
 }
 
 // CarveByName returns carve metadata by name
-func (d *Datastore) CarveByName(name string) (*fleet.CarveMetadata, error) {
-	return d.metadatadb.CarveByName(name)
+func (d *Datastore) CarveByName(ctx context.Context, name string) (*fleet.CarveMetadata, error) {
+	return d.metadatadb.CarveByName(ctx, name)
 }
 
 // ListCarves returns a list of the currently available carves
-func (d *Datastore) ListCarves(opt fleet.CarveListOptions) ([]*fleet.CarveMetadata, error) {
-	return d.metadatadb.ListCarves(opt)
+func (d *Datastore) ListCarves(ctx context.Context, opt fleet.CarveListOptions) ([]*fleet.CarveMetadata, error) {
+	return d.metadatadb.ListCarves(ctx, opt)
 }
 
 // listCompletedParts returns a list of the parts in a multipart updaload given a key and uploadID
@@ -167,7 +169,7 @@ func (d *Datastore) listCompletedParts(objectKey, uploadID string) ([]*s3.Comple
 }
 
 // NewBlock uploads a new block for a specific carve
-func (d *Datastore) NewBlock(metadata *fleet.CarveMetadata, blockID int64, data []byte) error {
+func (d *Datastore) NewBlock(ctx context.Context, metadata *fleet.CarveMetadata, blockID int64, data []byte) error {
 	objectKey := d.generateS3Key(metadata)
 	partNumber := blockID + 1 // PartNumber is 1-indexed
 	_, err := d.s3client.UploadPart(&s3.UploadPartInput{
@@ -178,19 +180,19 @@ func (d *Datastore) NewBlock(metadata *fleet.CarveMetadata, blockID int64, data 
 		UploadId:   &metadata.SessionId,
 	})
 	if err != nil {
-		return errors.Wrap(err, "s3 multipart carve upload")
+		return ctxerr.Wrap(ctx, err, "s3 multipart carve upload")
 	}
 	if metadata.MaxBlock < blockID {
 		metadata.MaxBlock = blockID
-		if err = d.UpdateCarve(metadata); err != nil {
-			return errors.Wrap(err, "s3 multipart carve upload")
+		if err = d.UpdateCarve(ctx, metadata); err != nil {
+			return ctxerr.Wrap(ctx, err, "s3 multipart carve upload")
 		}
 	}
 	if blockID >= metadata.BlockCount-1 {
 		// The last block was reached, multipart upload can be completed
 		parts, err := d.listCompletedParts(objectKey, metadata.SessionId)
 		if err != nil {
-			return errors.Wrap(err, "s3 multipart carve upload")
+			return ctxerr.Wrap(ctx, err, "s3 multipart carve upload")
 		}
 		_, err = d.s3client.CompleteMultipartUpload(&s3.CompleteMultipartUploadInput{
 			Bucket:          &d.bucket,
@@ -199,14 +201,14 @@ func (d *Datastore) NewBlock(metadata *fleet.CarveMetadata, blockID int64, data 
 			MultipartUpload: &s3.CompletedMultipartUpload{Parts: parts},
 		})
 		if err != nil {
-			return errors.Wrap(err, "s3 multipart carve upload")
+			return ctxerr.Wrap(ctx, err, "s3 multipart carve upload")
 		}
 	}
 	return nil
 }
 
 // GetBlock returns a block of data for a carve
-func (d *Datastore) GetBlock(metadata *fleet.CarveMetadata, blockID int64) ([]byte, error) {
+func (d *Datastore) GetBlock(ctx context.Context, metadata *fleet.CarveMetadata, blockID int64) ([]byte, error) {
 	objectKey := d.generateS3Key(metadata)
 	// blockID is 0-indexed and sequential so can be perfectly used for evaluating ranges
 	// range extremes are inclusive as for RFC-2616 (section 14.35)
@@ -219,19 +221,20 @@ func (d *Datastore) GetBlock(metadata *fleet.CarveMetadata, blockID int64) ([]by
 		Range:  &rangeString,
 	})
 	if err != nil {
-		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == s3.ErrCodeNoSuchKey {
+		var awsErr awserr.Error
+		if errors.As(err, &awsErr) && awsErr.Code() == s3.ErrCodeNoSuchKey {
 			// The carve does not exists in S3, mark expired
 			metadata.Expired = true
-			if updateErr := d.UpdateCarve(metadata); err != nil {
-				err = errors.Wrap(err, updateErr.Error())
+			if updateErr := d.UpdateCarve(ctx, metadata); err != nil {
+				err = ctxerr.Wrap(ctx, err, updateErr.Error())
 			}
 		}
-		return nil, errors.Wrap(err, "s3 carve get block")
+		return nil, ctxerr.Wrap(ctx, err, "s3 carve get block")
 	}
 	defer res.Body.Close()
 	carveData, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		return nil, errors.Wrap(err, "s3 carve get block")
+		return nil, ctxerr.Wrap(ctx, err, "s3 carve get block")
 	}
 	return carveData, nil
 }

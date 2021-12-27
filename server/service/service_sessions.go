@@ -5,36 +5,47 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
+	"fmt"
 	"net/url"
 	"time"
 
+	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/contexts/logging"
 	"github.com/fleetdm/fleet/v4/server/contexts/viewer"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/sso"
 	"github.com/go-kit/kit/log/level"
-	"github.com/pkg/errors"
 )
 
-func (svc *Service) SSOSettings(ctx context.Context) (*fleet.SSOSettings, error) {
+// SSOSettings returns a subset of the Single Sign-On settings as configured in
+// the app config. Those can be exposed e.g. via the response to an HTTP request,
+// and as such should not contain sensitive information.
+func (svc *Service) SSOSettings(ctx context.Context) (*fleet.SessionSSOSettings, error) {
 	// skipauth: Basic SSO settings are available to unauthenticated users (so
 	// that they have the necessary information to initiate SSO).
 	svc.authz.SkipAuthorization(ctx)
 
 	logging.WithLevel(ctx, level.Info)
 
-	appConfig, err := svc.ds.AppConfig()
+	appConfig, err := svc.ds.AppConfig(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, "SSOSettings getting app config")
+		return nil, ctxerr.Wrap(ctx, err, "SessionSSOSettings getting app config")
 	}
-	settings := &fleet.SSOSettings{
-		IDPName:     appConfig.IDPName,
-		IDPImageURL: appConfig.IDPImageURL,
-		SSOEnabled:  appConfig.EnableSSO,
+
+	settings := &fleet.SessionSSOSettings{
+		IDPName:     appConfig.SSOSettings.IDPName,
+		IDPImageURL: appConfig.SSOSettings.IDPImageURL,
+		SSOEnabled:  appConfig.SSOSettings.EnableSSO,
 	}
 	return settings, nil
 }
 
+// InitiateSSO initiates a Single Sign-On flow for a request to visit the
+// protected URL identified by redirectURL. It returns the URL of the identity
+// provider to make a request to to proceed with the authentication via that
+// external service, and stores ephemeral session state to validate the
+// callback from the identity provider to finalize the SSO flow.
 func (svc *Service) InitiateSSO(ctx context.Context, redirectURL string) (string, error) {
 	// skipauth: User context does not yet exist. Unauthenticated users may
 	// initiate SSO.
@@ -42,59 +53,64 @@ func (svc *Service) InitiateSSO(ctx context.Context, redirectURL string) (string
 
 	logging.WithLevel(ctx, level.Info)
 
-	appConfig, err := svc.ds.AppConfig()
+	appConfig, err := svc.ds.AppConfig(ctx)
 	if err != nil {
-		return "", errors.Wrap(err, "InitiateSSO getting app config")
+		return "", ctxerr.Wrap(ctx, err, "InitiateSSO getting app config")
 	}
 
 	metadata, err := svc.getMetadata(appConfig)
 	if err != nil {
-		return "", errors.Wrap(err, "InitiateSSO getting metadata")
+		return "", ctxerr.Wrap(ctx, err, "InitiateSSO getting metadata")
 	}
 
+	serverURL := appConfig.ServerSettings.ServerURL
 	settings := sso.Settings{
 		Metadata: metadata,
 		// Construct call back url to send to idp
-		AssertionConsumerServiceURL: appConfig.ServerURL + svc.config.Server.URLPrefix + "/api/v1/fleet/sso/callback",
+		AssertionConsumerServiceURL: serverURL + svc.config.Server.URLPrefix + "/api/v1/fleet/sso/callback",
 		SessionStore:                svc.ssoSessionStore,
 		OriginalURL:                 redirectURL,
 	}
 
 	// If issuer is not explicitly set, default to host name.
 	var issuer string
-	if appConfig.EntityID == "" {
-		u, err := url.Parse(appConfig.ServerURL)
+	entityID := appConfig.SSOSettings.EntityID
+	if entityID == "" {
+		u, err := url.Parse(serverURL)
 		if err != nil {
-			return "", errors.Wrap(err, "parse server url")
+			return "", ctxerr.Wrap(ctx, err, "parse server url")
 		}
 		issuer = u.Hostname()
 	} else {
-		issuer = appConfig.EntityID
+		issuer = entityID
 	}
+
 	idpURL, err := sso.CreateAuthorizationRequest(&settings, issuer)
 	if err != nil {
-		return "", errors.Wrap(err, "InitiateSSO creating authorization")
+		return "", ctxerr.Wrap(ctx, err, "InitiateSSO creating authorization")
 	}
 
 	return idpURL, nil
 }
 
 func (svc *Service) getMetadata(config *fleet.AppConfig) (*sso.Metadata, error) {
-	if config.MetadataURL != "" {
-		metadata, err := sso.GetMetadata(config.MetadataURL)
+	if config.SSOSettings.MetadataURL != "" {
+		metadata, err := sso.GetMetadata(config.SSOSettings.MetadataURL)
 		if err != nil {
 			return nil, err
 		}
 		return metadata, nil
 	}
-	if config.Metadata != "" {
-		metadata, err := sso.ParseMetadata(config.Metadata)
+
+	if config.SSOSettings.Metadata != "" {
+		metadata, err := sso.ParseMetadata(config.SSOSettings.Metadata)
 		if err != nil {
 			return nil, err
 		}
 		return metadata, nil
 	}
-	return nil, errors.Errorf("missing metadata for idp %s", config.IDPName)
+
+	return nil, fmt.Errorf("missing metadata for idp %s", config.SSOSettings.IDPName)
 }
 
 func (svc *Service) CallbackSSO(ctx context.Context, auth fleet.Auth) (*fleet.SSOSession, error) {
@@ -104,9 +120,9 @@ func (svc *Service) CallbackSSO(ctx context.Context, auth fleet.Auth) (*fleet.SS
 
 	logging.WithLevel(ctx, level.Info)
 
-	appConfig, err := svc.ds.AppConfig()
+	appConfig, err := svc.ds.AppConfig(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, "get config for sso")
+		return nil, ctxerr.Wrap(ctx, err, "get config for sso")
 	}
 
 	// Load the request metadata if available
@@ -114,26 +130,27 @@ func (svc *Service) CallbackSSO(ctx context.Context, auth fleet.Auth) (*fleet.SS
 	// localhost:9080/simplesaml/saml2/idp/SSOService.php?spentityid=https://localhost:8080
 	var metadata *sso.Metadata
 	var redirectURL string
-	if appConfig.EnableSSOIdPLogin && auth.RequestID() == "" {
+
+	if appConfig.SSOSettings.EnableSSOIdPLogin && auth.RequestID() == "" {
 		// Missing request ID indicates this was IdP-initiated. Only allow if
 		// configured to do so.
 		metadata, err = svc.getMetadata(appConfig)
 		if err != nil {
-			return nil, errors.Wrap(err, "get sso metadata")
+			return nil, ctxerr.Wrap(ctx, err, "get sso metadata")
 		}
 		redirectURL = "/"
 	} else {
 		session, err := svc.ssoSessionStore.Get(auth.RequestID())
 		if err != nil {
-			return nil, errors.Wrap(err, "sso request invalid")
+			return nil, ctxerr.Wrap(ctx, err, "sso request invalid")
 		}
 		// Remove session to so that is can't be reused before it expires.
 		err = svc.ssoSessionStore.Expire(auth.RequestID())
 		if err != nil {
-			return nil, errors.Wrap(err, "remove sso request")
+			return nil, ctxerr.Wrap(ctx, err, "remove sso request")
 		}
 		if err := xml.Unmarshal([]byte(session.Metadata), &metadata); err != nil {
-			return nil, errors.Wrap(err, "unmarshal metadata")
+			return nil, ctxerr.Wrap(ctx, err, "unmarshal metadata")
 		}
 		redirectURL = session.OriginalURL
 	}
@@ -141,31 +158,31 @@ func (svc *Service) CallbackSSO(ctx context.Context, auth fleet.Auth) (*fleet.SS
 	// Validate response
 	validator, err := sso.NewValidator(*metadata)
 	if err != nil {
-		return nil, errors.Wrap(err, "create validator from metadata")
+		return nil, ctxerr.Wrap(ctx, err, "create validator from metadata")
 	}
 	// make sure the response hasn't been tampered with
 	auth, err = validator.ValidateSignature(auth)
 	if err != nil {
-		return nil, errors.Wrap(err, "signature validation failed")
+		return nil, ctxerr.Wrap(ctx, err, "signature validation failed")
 	}
 	// make sure the response isn't stale
 	err = validator.ValidateResponse(auth)
 	if err != nil {
-		return nil, errors.Wrap(err, "response validation failed")
+		return nil, ctxerr.Wrap(ctx, err, "response validation failed")
 	}
 
 	// Get and log in user
-	user, err := svc.ds.UserByEmail(auth.UserID())
+	user, err := svc.ds.UserByEmail(ctx, auth.UserID())
 	if err != nil {
-		return nil, errors.Wrap(err, "find user in sso callback")
+		return nil, ctxerr.Wrap(ctx, err, "find user in sso callback")
 	}
 	// if the user is not sso enabled they are not authorized
 	if !user.SSOEnabled {
-		return nil, errors.New("user not configured to use sso")
+		return nil, ctxerr.New(ctx, "user not configured to use sso")
 	}
-	token, err := svc.makeSession(user.ID)
+	token, err := svc.makeSession(ctx, user.ID)
 	if err != nil {
-		return nil, errors.Wrap(err, "make session in sso callback")
+		return nil, ctxerr.Wrap(ctx, err, "make session in sso callback")
 	}
 	result := &fleet.SSOSession{
 		Token:       token,
@@ -190,8 +207,9 @@ func (svc *Service) Login(ctx context.Context, email, password string) (*fleet.U
 		}
 	}(time.Now())
 
-	user, err := svc.ds.UserByEmail(email)
-	if _, ok := err.(fleet.NotFoundError); ok {
+	user, err := svc.ds.UserByEmail(ctx, email)
+	var nfe fleet.NotFoundError
+	if errors.As(err, &nfe) {
 		return nil, "", fleet.NewAuthFailedError("user not found")
 	}
 	if err != nil {
@@ -206,7 +224,7 @@ func (svc *Service) Login(ctx context.Context, email, password string) (*fleet.U
 		return nil, "", fleet.NewAuthFailedError("password login disabled for sso users")
 	}
 
-	token, err := svc.makeSession(user.ID)
+	token, err := svc.makeSession(ctx, user.ID)
 	if err != nil {
 		return nil, "", fleet.NewAuthFailedError(err.Error())
 	}
@@ -215,7 +233,7 @@ func (svc *Service) Login(ctx context.Context, email, password string) (*fleet.U
 }
 
 // makeSession is a helper that creates a new session after authentication
-func (svc *Service) makeSession(id uint) (string, error) {
+func (svc *Service) makeSession(ctx context.Context, id uint) (string, error) {
 	sessionKeySize := svc.config.Session.KeySize
 	key := make([]byte, sessionKeySize)
 	_, err := rand.Read(key)
@@ -230,9 +248,9 @@ func (svc *Service) makeSession(id uint) (string, error) {
 		AccessedAt: time.Now().UTC(),
 	}
 
-	session, err = svc.ds.NewSession(session)
+	_, err = svc.ds.NewSession(ctx, session)
 	if err != nil {
-		return "", errors.Wrap(err, "creating new session")
+		return "", ctxerr.Wrap(ctx, err, "creating new session")
 	}
 
 	return sessionKey, nil
@@ -254,7 +272,7 @@ func (svc *Service) DestroySession(ctx context.Context) error {
 		return fleet.ErrNoContext
 	}
 
-	session, err := svc.ds.SessionByID(vc.SessionID())
+	session, err := svc.ds.SessionByID(ctx, vc.SessionID())
 	if err != nil {
 		return err
 	}
@@ -263,7 +281,7 @@ func (svc *Service) DestroySession(ctx context.Context) error {
 		return err
 	}
 
-	return svc.ds.DestroySession(session)
+	return svc.ds.DestroySession(ctx, session)
 }
 
 func (svc *Service) GetInfoAboutSessionsForUser(ctx context.Context, id uint) ([]*fleet.Session, error) {
@@ -273,13 +291,13 @@ func (svc *Service) GetInfoAboutSessionsForUser(ctx context.Context, id uint) ([
 
 	var validatedSessions []*fleet.Session
 
-	sessions, err := svc.ds.ListSessionsForUser(id)
+	sessions, err := svc.ds.ListSessionsForUser(ctx, id)
 	if err != nil {
 		return validatedSessions, err
 	}
 
 	for _, session := range sessions {
-		if svc.validateSession(session) == nil {
+		if svc.validateSession(ctx, session) == nil {
 			validatedSessions = append(validatedSessions, session)
 		}
 	}
@@ -292,11 +310,11 @@ func (svc *Service) DeleteSessionsForUser(ctx context.Context, id uint) error {
 		return err
 	}
 
-	return svc.ds.DestroyAllSessionsForUser(id)
+	return svc.ds.DestroyAllSessionsForUser(ctx, id)
 }
 
 func (svc *Service) GetInfoAboutSession(ctx context.Context, id uint) (*fleet.Session, error) {
-	session, err := svc.ds.SessionByID(id)
+	session, err := svc.ds.SessionByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +323,7 @@ func (svc *Service) GetInfoAboutSession(ctx context.Context, id uint) (*fleet.Se
 		return nil, err
 	}
 
-	err = svc.validateSession(session)
+	err = svc.validateSession(ctx, session)
 	if err != nil {
 		return nil, err
 	}
@@ -314,12 +332,12 @@ func (svc *Service) GetInfoAboutSession(ctx context.Context, id uint) (*fleet.Se
 }
 
 func (svc *Service) GetSessionByKey(ctx context.Context, key string) (*fleet.Session, error) {
-	session, err := svc.ds.SessionByKey(key)
+	session, err := svc.ds.SessionByKey(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 
-	err = svc.validateSession(session)
+	err = svc.validateSession(ctx, session)
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +346,7 @@ func (svc *Service) GetSessionByKey(ctx context.Context, key string) (*fleet.Ses
 }
 
 func (svc *Service) DeleteSession(ctx context.Context, id uint) error {
-	session, err := svc.ds.SessionByID(id)
+	session, err := svc.ds.SessionByID(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -337,10 +355,10 @@ func (svc *Service) DeleteSession(ctx context.Context, id uint) error {
 		return err
 	}
 
-	return svc.ds.DestroySession(session)
+	return svc.ds.DestroySession(ctx, session)
 }
 
-func (svc *Service) validateSession(session *fleet.Session) error {
+func (svc *Service) validateSession(ctx context.Context, session *fleet.Session) error {
 	if session == nil {
 		return fleet.NewAuthRequiredError("active session not present")
 	}
@@ -348,12 +366,12 @@ func (svc *Service) validateSession(session *fleet.Session) error {
 	sessionDuration := svc.config.Session.Duration
 	// duration 0 = unlimited
 	if sessionDuration != 0 && time.Since(session.AccessedAt) >= sessionDuration {
-		err := svc.ds.DestroySession(session)
+		err := svc.ds.DestroySession(ctx, session)
 		if err != nil {
-			return errors.Wrap(err, "destroying session")
+			return ctxerr.Wrap(ctx, err, "destroying session")
 		}
 		return fleet.NewAuthRequiredError("expired session")
 	}
 
-	return svc.ds.MarkSessionAccessed(session)
+	return svc.ds.MarkSessionAccessed(ctx, session)
 }

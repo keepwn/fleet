@@ -64,6 +64,7 @@
   &__errors {
     font-size: $x-small;
     font-weight: $bold;
+    color: $core-vibrant-red;
   }
 
   &__hint {
@@ -79,6 +80,19 @@
       background-color: $ui-light-grey;
       padding: $pad-xxsmall;
       font-family: "SourceCodePro", $monospace;
+    }
+  }
+
+  // overwrite icon position and input padding
+  &--icon-start {
+    input {
+      padding: 9px 1rem 9px 3rem;
+    }
+    .fleeticon {
+      right: auto;
+      left: 16px;
+      top: 39px;
+      font-weight: 700;
     }
   }
 }

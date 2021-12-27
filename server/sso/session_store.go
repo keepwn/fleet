@@ -3,11 +3,12 @@ package sso
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
-	"github.com/mna/redisc"
-	"github.com/pkg/errors"
+	"github.com/fleetdm/fleet/v4/server/datastore/redis"
+	"github.com/fleetdm/fleet/v4/server/fleet"
+	redigo "github.com/gomodule/redigo/redis"
 )
 
 // Session stores state for the lifetime of a single sign on session
@@ -28,25 +29,25 @@ type Session struct {
 // is constrained in the backing store (Redis) so if the sso process is not completed in
 // a reasonable amount of time, it automatically expires and is removed.
 type SessionStore interface {
-	create(requestID, originalURL, x509Cert string, lifetimeSecs uint) error
+	create(requestID, originalURL, metadata string, lifetimeSecs uint) error
 	Get(requestID string) (*Session, error)
 	Expire(requestID string) error
 }
 
 // NewSessionStore creates a SessionStore
-func NewSessionStore(pool *redisc.Cluster) SessionStore {
+func NewSessionStore(pool fleet.RedisPool) SessionStore {
 	return &store{pool}
 }
 
 type store struct {
-	pool *redisc.Cluster
+	pool fleet.RedisPool
 }
 
 func (s *store) create(requestID, originalURL, metadata string, lifetimeSecs uint) error {
 	if len(requestID) < 8 {
 		return errors.New("request id must be 8 or more characters in length")
 	}
-	conn := s.pool.Get()
+	conn := redis.ConfigureDoer(s.pool, s.pool.Get())
 	defer conn.Close()
 	sess := Session{OriginalURL: originalURL, Metadata: metadata}
 	var writer bytes.Buffer
@@ -59,11 +60,14 @@ func (s *store) create(requestID, originalURL, metadata string, lifetimeSecs uin
 }
 
 func (s *store) Get(requestID string) (*Session, error) {
-	conn := s.pool.Get()
+	// not reading from a replica here as this gets called in close succession
+	// in the auth flow, with initiate SSO writing and callback SSO having to
+	// read that write.
+	conn := redis.ConfigureDoer(s.pool, s.pool.Get())
 	defer conn.Close()
-	val, err := redis.String(conn.Do("GET", requestID))
+	val, err := redigo.String(conn.Do("GET", requestID))
 	if err != nil {
-		if err == redis.ErrNil {
+		if err == redigo.ErrNil {
 			return nil, ErrSessionNotFound
 		}
 		return nil, err
@@ -81,7 +85,7 @@ func (s *store) Get(requestID string) (*Session, error) {
 var ErrSessionNotFound = errors.New("session not found")
 
 func (s *store) Expire(requestID string) error {
-	conn := s.pool.Get()
+	conn := redis.ConfigureDoer(s.pool, s.pool.Get())
 	defer conn.Close()
 	_, err := conn.Do("DEL", requestID)
 	return err

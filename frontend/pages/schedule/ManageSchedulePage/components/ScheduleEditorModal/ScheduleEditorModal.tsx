@@ -6,7 +6,7 @@ import Fleet from "fleet";
 import { pull } from "lodash";
 // @ts-ignore
 import FleetIcon from "components/icons/FleetIcon";
-import Modal from "components/modals/Modal";
+import Modal from "components/Modal";
 import Button from "components/buttons/Button";
 import InfoBanner from "components/InfoBanner/InfoBanner";
 // @ts-ignore
@@ -18,10 +18,12 @@ import { IGlobalScheduledQuery } from "interfaces/global_scheduled_query";
 import { ITeamScheduledQuery } from "interfaces/team_scheduled_query";
 import {
   FREQUENCY_DROPDOWN_OPTIONS,
-  PLATFORM_OPTIONS,
+  PLATFORM_DROPDOWN_OPTIONS,
   LOGGING_TYPE_OPTIONS,
   MIN_OSQUERY_VERSION_OPTIONS,
 } from "utilities/constants";
+
+import PreviewDataModal from "../PreviewDataModal";
 
 const baseClass = "schedule-editor-modal";
 
@@ -46,6 +48,8 @@ interface IScheduleEditorModalProps {
   ) => void;
   editQuery?: IGlobalScheduledQuery | ITeamScheduledQuery;
   teamId?: number;
+  togglePreviewDataModal: () => void;
+  showPreviewDataModal: boolean;
 }
 interface INoQueryOption {
   id: number;
@@ -87,6 +91,8 @@ const ScheduleEditorModal = ({
   allQueries,
   editQuery,
   teamId,
+  togglePreviewDataModal,
+  showPreviewDataModal,
 }: IScheduleEditorModalProps): JSX.Element => {
   const [loggingConfig, setLoggingConfig] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -229,6 +235,10 @@ const ScheduleEditorModal = ({
     );
   };
 
+  if (showPreviewDataModal) {
+    return <PreviewDataModal onCancel={togglePreviewDataModal} />;
+  }
+
   return (
     <Modal
       title={editQuery?.name || "Schedule editor"}
@@ -270,9 +280,9 @@ const ScheduleEditorModal = ({
               target="_blank"
               rel="noopener noreferrer"
             >
-              how configure a different log destination.&nbsp;
-              <FleetIcon name="external-link" />
+              how to configure a different log destination
             </a>
+            .
           </p>
         </InfoBanner>
         <div>
@@ -297,7 +307,7 @@ const ScheduleEditorModal = ({
                 wrapperClassName={`${baseClass}__form-field ${baseClass}__form-field--logging`}
               />
               <Dropdown
-                options={PLATFORM_OPTIONS}
+                options={PLATFORM_DROPDOWN_OPTIONS}
                 placeholder="Select"
                 label="Platform"
                 onChange={onChangeSelectPlatformOptions}
@@ -324,24 +334,34 @@ const ScheduleEditorModal = ({
             </div>
           )}
         </div>
-
         <div className={`${baseClass}__btn-wrap`}>
-          <Button
-            className={`${baseClass}__btn`}
-            type="button"
-            variant="brand"
-            onClick={onFormSubmit}
-            disabled={!selectedQuery && !editQuery}
-          >
-            Schedule
-          </Button>
-          <Button
-            className={`${baseClass}__btn`}
-            onClick={onCancel}
-            variant="inverse"
-          >
-            Cancel
-          </Button>
+          <div className={`${baseClass}__preview-btn-wrap`}>
+            <Button
+              type="button"
+              variant="inverse"
+              onClick={togglePreviewDataModal}
+            >
+              Preview data
+            </Button>
+          </div>
+          <div className={`${baseClass}__cta-btn-wrap`}>
+            <Button
+              className={`${baseClass}__btn`}
+              onClick={onCancel}
+              variant="inverse"
+            >
+              Cancel
+            </Button>
+            <Button
+              className={`${baseClass}__btn`}
+              type="button"
+              variant="brand"
+              onClick={onFormSubmit}
+              disabled={!selectedQuery && !editQuery}
+            >
+              Schedule
+            </Button>
+          </div>
         </div>
       </form>
     </Modal>

@@ -1,21 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"net/url"
-
-	"github.com/fleetdm/fleet/v4/server/logging"
-	"github.com/fleetdm/fleet/v4/server/ptr"
-
-	"github.com/e-dard/netbug"
-	"github.com/fleetdm/fleet/v4/server"
-
 	"io/ioutil"
+	"math/rand"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
@@ -23,31 +17,37 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fleetdm/fleet/v4/server/vulnerabilities"
-
 	"github.com/WatchBeam/clock"
+	"github.com/e-dard/netbug"
 	"github.com/fleetdm/fleet/v4/ee/server/licensing"
 	eeservice "github.com/fleetdm/fleet/v4/ee/server/service"
+	"github.com/fleetdm/fleet/v4/server"
 	"github.com/fleetdm/fleet/v4/server/config"
+	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
+	"github.com/fleetdm/fleet/v4/server/datastore/cached_mysql"
 	"github.com/fleetdm/fleet/v4/server/datastore/mysql"
+	"github.com/fleetdm/fleet/v4/server/datastore/redis"
 	"github.com/fleetdm/fleet/v4/server/datastore/s3"
+	"github.com/fleetdm/fleet/v4/server/errorstore"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/health"
 	"github.com/fleetdm/fleet/v4/server/launcher"
 	"github.com/fleetdm/fleet/v4/server/live_query"
+	"github.com/fleetdm/fleet/v4/server/logging"
 	"github.com/fleetdm/fleet/v4/server/mail"
 	"github.com/fleetdm/fleet/v4/server/pubsub"
 	"github.com/fleetdm/fleet/v4/server/service"
+	"github.com/fleetdm/fleet/v4/server/service/async"
 	"github.com/fleetdm/fleet/v4/server/sso"
+	"github.com/fleetdm/fleet/v4/server/vulnerabilities"
+	"github.com/fleetdm/fleet/v4/server/webhooks"
 	kitlog "github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	kitprometheus "github.com/go-kit/kit/metrics/prometheus"
 	"github.com/kolide/kit/version"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
-	"github.com/throttled/throttled/v2/store/redigostore"
 	"google.golang.org/grpc"
 )
 
@@ -64,8 +64,10 @@ func createServeCmd(configManager config.Manager) *cobra.Command {
 	debug := false
 	// Whether to enable developer options
 	dev := false
-	// Whether to enable development Fleet Basic license
+	// Whether to enable development Fleet Premium license
 	devLicense := false
+	// Whether to enable development Fleet Premium license with an expired license
+	devExpiredLicense := false
 
 	serveCmd := &cobra.Command{
 		Use:   "serve",
@@ -88,6 +90,9 @@ the way that the Fleet server works.
 			if devLicense {
 				// This license key is valid for development only
 				config.License.Key = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJGbGVldCBEZXZpY2UgTWFuYWdlbWVudCBJbmMuIiwiZXhwIjoxNjQwOTk1MjAwLCJzdWIiOiJkZXZlbG9wbWVudCIsImRldmljZXMiOjEwMCwibm90ZSI6ImZvciBkZXZlbG9wbWVudCBvbmx5IiwidGllciI6ImJhc2ljIiwiaWF0IjoxNjIyNDI2NTg2fQ.WmZ0kG4seW3IrNvULCHUPBSfFdqj38A_eiXdV_DFunMHechjHbkwtfkf1J6JQJoDyqn8raXpgbdhafDwv3rmDw"
+			} else if devExpiredLicense {
+				// An expired license key
+				config.License.Key = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJGbGVldCBEZXZpY2UgTWFuYWdlbWVudCBJbmMuIiwiZXhwIjoxNjI5NzYzMjAwLCJzdWIiOiJEZXYgbGljZW5zZSAoZXhwaXJlZCkiLCJkZXZpY2VzIjo1MDAwMDAsIm5vdGUiOiJUaGlzIGxpY2Vuc2UgaXMgdXNlZCB0byBmb3IgZGV2ZWxvcG1lbnQgcHVycG9zZXMuIiwidGllciI6ImJhc2ljIiwiaWF0IjoxNjI5OTA0NzMyfQ.AOppRkl1Mlc_dYKH9zwRqaTcL0_bQzs7RM3WSmxd3PeCH9CxJREfXma8gm0Iand6uIWw8gHq5Dn0Ivtv80xKvQ"
 			}
 
 			license, err := licensing.LoadLicense(config.License.Key)
@@ -96,6 +101,10 @@ the way that the Fleet server works.
 					err,
 					"failed to load license - for help use https://fleetdm.com/contact",
 				)
+			}
+
+			if license != nil && license.IsPremium() && license.IsExpired() {
+				fleet.WriteExpiredLicenseBanner(os.Stderr)
 			}
 
 			var logger kitlog.Logger
@@ -121,7 +130,7 @@ the way that the Fleet server works.
 				"hostname": true,
 			}
 			if !allowedHostIdentifiers[config.Osquery.HostIdentifier] {
-				initFatal(errors.Errorf("%s is not a valid value for osquery_host_identifier", config.Osquery.HostIdentifier), "set host identifier")
+				initFatal(fmt.Errorf("%s is not a valid value for osquery_host_identifier", config.Osquery.HostIdentifier), "set host identifier")
 			}
 
 			if len(config.Server.URLPrefix) > 0 {
@@ -133,7 +142,7 @@ the way that the Fleet server works.
 
 				if !allowedURLPrefixRegexp.MatchString(config.Server.URLPrefix) {
 					initFatal(
-						errors.Errorf("prefix must match regexp \"%s\"", allowedURLPrefixRegexp.String()),
+						fmt.Errorf("prefix must match regexp \"%s\"", allowedURLPrefixRegexp.String()),
 						"setting server URL prefix",
 					)
 				}
@@ -143,10 +152,15 @@ the way that the Fleet server works.
 			var carveStore fleet.CarveStore
 			mailService := mail.NewService()
 
-			ds, err = mysql.New(config.Mysql, clock.C, mysql.Logger(logger))
+			var replicaOpt mysql.DBOption
+			if config.MysqlReadReplica.Address != "" {
+				replicaOpt = mysql.Replica(&config.MysqlReadReplica)
+			}
+			ds, err = mysql.New(config.Mysql, clock.C, mysql.Logger(logger), replicaOpt)
 			if err != nil {
 				initFatal(err, "initializing datastore")
 			}
+
 			if config.S3.Bucket != "" {
 				carveStore, err = s3.New(config.S3, ds)
 				if err != nil {
@@ -156,22 +170,45 @@ the way that the Fleet server works.
 				carveStore = ds
 			}
 
-			migrationStatus, err := ds.MigrationStatus()
+			migrationStatus, err := ds.MigrationStatus(cmd.Context())
 			if err != nil {
 				initFatal(err, "retrieving migration status")
 			}
 
-			switch migrationStatus {
+			switch migrationStatus.StatusCode {
+			case fleet.AllMigrationsCompleted:
+				// OK
+			case fleet.UnknownMigrations:
+				fmt.Printf("################################################################################\n"+
+					"# WARNING:\n"+
+					"#   Your Fleet database has unrecognized migrations. This could happen when\n"+
+					"#   running an older version of Fleet on a newer migrated database.\n"+
+					"#\n"+
+					"#   Unknown migrations: tables=%v, data=%v.\n"+
+					"################################################################################\n",
+					migrationStatus.UnknownTable, migrationStatus.UnknownData)
+				if dev {
+					os.Exit(1)
+				}
 			case fleet.SomeMigrationsCompleted:
 				fmt.Printf("################################################################################\n"+
 					"# WARNING:\n"+
 					"#   Your Fleet database is missing required migrations. This is likely to cause\n"+
 					"#   errors in Fleet.\n"+
 					"#\n"+
+					"#   Missing migrations: tables=%v, data=%v.\n"+
+					"#\n"+
 					"#   Run `%s prepare db` to perform migrations.\n"+
+					"#\n"+
+					"#   To run the server without performing migrations:\n"+
+					"#     - Set environment variable FLEET_UPGRADES_ALLOW_MISSING_MIGRATIONS=1, or,\n"+
+					"#     - Set config updates.allow_mising_migrations to true, or,\n"+
+					"#     - Use command line argument --upgrades_allow_missing_migrations=true\n"+
 					"################################################################################\n",
-					os.Args[0])
-
+					migrationStatus.MissingTable, migrationStatus.MissingData, os.Args[0])
+				if !config.Upgrades.AllowMissingMigrations {
+					os.Exit(1)
+				}
 			case fleet.NoMigrationsCompleted:
 				fmt.Printf("################################################################################\n"+
 					"# ERROR:\n"+
@@ -189,12 +226,41 @@ the way that the Fleet server works.
 				}
 			}
 
-			redisPool, err := pubsub.NewRedisPool(config.Redis.Address, config.Redis.Password, config.Redis.Database, config.Redis.UseTLS)
+			redisPool, err := redis.NewPool(redis.PoolConfig{
+				Server:                    config.Redis.Address,
+				Password:                  config.Redis.Password,
+				Database:                  config.Redis.Database,
+				UseTLS:                    config.Redis.UseTLS,
+				ConnTimeout:               config.Redis.ConnectTimeout,
+				KeepAlive:                 config.Redis.KeepAlive,
+				ConnectRetryAttempts:      config.Redis.ConnectRetryAttempts,
+				ClusterFollowRedirections: config.Redis.ClusterFollowRedirections,
+				ClusterReadFromReplica:    config.Redis.ClusterReadFromReplica,
+				TLSCert:                   config.Redis.TLSCert,
+				TLSKey:                    config.Redis.TLSKey,
+				TLSCA:                     config.Redis.TLSCA,
+				TLSServerName:             config.Redis.TLSServerName,
+				TLSHandshakeTimeout:       config.Redis.TLSHandshakeTimeout,
+				MaxIdleConns:              config.Redis.MaxIdleConns,
+				MaxOpenConns:              config.Redis.MaxOpenConns,
+				ConnMaxLifetime:           config.Redis.ConnMaxLifetime,
+				IdleTimeout:               config.Redis.IdleTimeout,
+				ConnWaitTimeout:           config.Redis.ConnWaitTimeout,
+			})
 			if err != nil {
 				initFatal(err, "initialize Redis")
 			}
+			level.Info(logger).Log("component", "redis", "mode", redisPool.Mode())
+
+			ds = cached_mysql.New(ds)
 			resultStore := pubsub.NewRedisQueryResults(redisPool, config.Redis.DuplicateResults)
 			liveQueryStore := live_query.NewRedisLiveQuery(redisPool)
+			if err := liveQueryStore.MigrateKeys(); err != nil {
+				level.Info(logger).Log(
+					"err", err,
+					"msg", "failed to migrate live query redis keys",
+				)
+			}
 			ssoSessionStore := sso.NewSessionStore(redisPool)
 
 			osqueryLogger, err := logging.New(config, logger)
@@ -202,31 +268,41 @@ the way that the Fleet server works.
 				initFatal(err, "initializing osquery logging")
 			}
 
-			svc, err := service.NewService(ds, resultStore, logger, osqueryLogger, config, mailService, clock.C, ssoSessionStore, liveQueryStore, carveStore, *license)
+			task := &async.Task{
+				Datastore:          ds,
+				Pool:               redisPool,
+				AsyncEnabled:       config.Osquery.EnableAsyncHostProcessing,
+				LockTimeout:        config.Osquery.AsyncHostCollectLockTimeout,
+				LogStatsInterval:   config.Osquery.AsyncHostCollectLogStatsInterval,
+				InsertBatch:        config.Osquery.AsyncHostInsertBatch,
+				DeleteBatch:        config.Osquery.AsyncHostDeleteBatch,
+				UpdateBatch:        config.Osquery.AsyncHostUpdateBatch,
+				RedisPopCount:      config.Osquery.AsyncHostRedisPopCount,
+				RedisScanKeysCount: config.Osquery.AsyncHostRedisScanKeysCount,
+			}
+			svc, err := service.NewService(ds, task, resultStore, logger, osqueryLogger, config, mailService, clock.C, ssoSessionStore, liveQueryStore, carveStore, *license)
 			if err != nil {
 				initFatal(err, "initializing service")
 			}
 
-			if license.Tier == fleet.TierBasic {
+			if license.IsPremium() {
 				svc, err = eeservice.NewService(svc, ds, logger, config, mailService, clock.C, license)
 				if err != nil {
-					initFatal(err, "initial Fleet Basic service")
+					initFatal(err, "initial Fleet Premium service")
 				}
 			}
 
-			cancelBackground := runCrons(ds, kitlog.With(logger, "component", "crons"), config)
+			cancelBackground := runCrons(ds, task, kitlog.With(logger, "component", "crons"), config, license)
 
 			// Flush seen hosts every second
 			go func() {
-				ticker := time.NewTicker(1 * time.Second)
-				for {
+				for range time.Tick(time.Duration(rand.Intn(10)+1) * time.Second) {
 					if err := svc.FlushSeenHosts(context.Background()); err != nil {
 						level.Info(logger).Log(
 							"err", err,
 							"msg", "failed to update host seen times",
 						)
 					}
-					<-ticker.C
 				}
 			}()
 
@@ -248,9 +324,9 @@ the way that the Fleet server works.
 
 			httpLogger := kitlog.With(logger, "component", "http")
 
-			limiterStore, err := redigostore.New(redisPool, "ratelimit::", 0)
-			if err != nil {
-				initFatal(err, "initialize rate limit store")
+			limiterStore := &redis.ThrottledStore{
+				Pool:      redisPool,
+				KeyPrefix: "ratelimit::",
 			}
 
 			var apiHandler, frontendHandler http.Handler
@@ -294,6 +370,11 @@ the way that the Fleet server works.
 			// Instantiate a gRPC service to handle launcher requests.
 			launcher := launcher.New(svc, logger, grpc.NewServer(), healthCheckers)
 
+			// TODO: gather all the different contexts and use just one
+			ctx, cancelFunc := context.WithCancel(context.Background())
+			defer cancelFunc()
+			eh := errorstore.NewHandler(ctx, redisPool, logger, config.Logging.ErrorRetentionPeriod)
+
 			rootMux := http.NewServeMux()
 			rootMux.Handle("/healthz", prometheus.InstrumentHandler("healthz", health.Handler(httpLogger, healthCheckers)))
 			rootMux.Handle("/version", prometheus.InstrumentHandler("version", version.Handler()))
@@ -301,7 +382,7 @@ the way that the Fleet server works.
 			rootMux.Handle("/metrics", prometheus.InstrumentHandler("metrics", promhttp.Handler()))
 			rootMux.Handle("/api/", apiHandler)
 			rootMux.Handle("/", frontendHandler)
-			rootMux.Handle("/debug/", service.MakeDebugHandler(svc, config, logger))
+			rootMux.Handle("/debug/", service.MakeDebugHandler(svc, config, logger, eh, ds))
 
 			if path, ok := os.LookupEnv("FLEET_TEST_PAGE_PATH"); ok {
 				// test that we can load this
@@ -337,14 +418,41 @@ the way that the Fleet server works.
 				rootMux = prefixMux
 			}
 
+			liveQueryRestPeriod := 90 * time.Second // default (see #1798)
+			if v := os.Getenv("FLEET_LIVE_QUERY_REST_PERIOD"); v != "" {
+				duration, err := time.ParseDuration(v)
+				if err != nil {
+					level.Error(logger).Log("live_query_rest_period_err", err)
+				} else {
+					liveQueryRestPeriod = duration
+				}
+			}
+
+			defaultWritetimeout := 40 * time.Second
+			writeTimeout := defaultWritetimeout
+			// The "GET /api/v1/fleet/queries/run" API requires
+			// WriteTimeout to be higher than the live query rest period
+			// (otherwise the response is not sent back to the client).
+			//
+			// We add 10s to the live query rest period to allow the writing
+			// of the response.
+			liveQueryRestPeriod += 10 * time.Second
+			if liveQueryRestPeriod > writeTimeout {
+				writeTimeout = liveQueryRestPeriod
+			}
+
+			httpSrvCtx := ctxerr.NewContext(ctx, eh)
 			srv := &http.Server{
 				Addr:              config.Server.Address,
 				Handler:           launcher.Handler(rootMux),
 				ReadTimeout:       25 * time.Second,
-				WriteTimeout:      40 * time.Second,
+				WriteTimeout:      writeTimeout,
 				ReadHeaderTimeout: 5 * time.Second,
 				IdleTimeout:       5 * time.Minute,
 				MaxHeaderBytes:    1 << 18, // 0.25 MB (262144 bytes)
+				BaseContext: func(l net.Listener) context.Context {
+					return httpSrvCtx
+				},
 			}
 			srv.SetKeepAlivesEnabled(config.Server.Keepalive)
 			errs := make(chan error, 2)
@@ -364,11 +472,12 @@ the way that the Fleet server works.
 			go func() {
 				sig := make(chan os.Signal, 1)
 				signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-				<-sig //block on signal
+				<-sig // block on signal
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				errs <- func() error {
 					cancelBackground()
+					cancelFunc()
 					launcher.GracefulStop()
 					return srv.Shutdown(ctx)
 				}()
@@ -381,41 +490,27 @@ the way that the Fleet server works.
 	serveCmd.PersistentFlags().BoolVar(&debug, "debug", false, "Enable debug endpoints")
 	serveCmd.PersistentFlags().BoolVar(&dev, "dev", false, "Enable developer options")
 	serveCmd.PersistentFlags().BoolVar(&devLicense, "dev_license", false, "Enable development license")
+	serveCmd.PersistentFlags().BoolVar(&devExpiredLicense, "dev_expired_license", false, "Enable expired development license")
 
 	return serveCmd
-}
-
-// Locker represents an object that can obtain an atomic lock on a resource
-// in a non blocking manner for an owner, with an expiration time.
-type Locker interface {
-	// Lock tries to get an atomic lock on an instance named with `name`
-	// and an `owner` identified by a random string per instance.
-	// Subsequently locking the same resource name for the same owner
-	// renews the lock expiration.
-	// It returns true, nil if it managed to obtain a lock on the instance.
-	// false and potentially an error otherwise.
-	// This must not be blocking.
-	Lock(name string, owner string, expiration time.Duration) (bool, error)
-	// Unlock tries to unlock the lock by that `name` for the specified
-	// `owner`. Unlocking when not holding the lock shouldn't error
-	Unlock(name string, owner string) error
 }
 
 const (
 	lockKeyLeader          = "leader"
 	lockKeyVulnerabilities = "vulnerabilities"
+	lockKeyWebhooks        = "webhooks"
 )
 
-func trySendStatistics(ds fleet.Datastore, frequency time.Duration, url string) error {
-	ac, err := ds.AppConfig()
+func trySendStatistics(ctx context.Context, ds fleet.Datastore, frequency time.Duration, url string, license *fleet.LicenseInfo) error {
+	ac, err := ds.AppConfig(ctx)
 	if err != nil {
 		return err
 	}
-	if !ac.EnableAnalytics {
+	if !ac.ServerSettings.EnableAnalytics {
 		return nil
 	}
 
-	stats, shouldSend, err := ds.ShouldSendStatistics(frequency)
+	stats, shouldSend, err := ds.ShouldSendStatistics(ctx, frequency, license)
 	if err != nil {
 		return err
 	}
@@ -423,31 +518,14 @@ func trySendStatistics(ds fleet.Datastore, frequency time.Duration, url string) 
 		return nil
 	}
 
-	statsBytes, err := json.Marshal(stats)
+	err = server.PostJSONWithTimeout(ctx, url, stats)
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(statsBytes))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return errors.Errorf("Error posting to %s: %d", url, resp.StatusCode)
-	}
-	return ds.RecordStatisticsSent()
+	return ds.RecordStatisticsSent(ctx)
 }
 
-func runCrons(ds fleet.Datastore, logger kitlog.Logger, config config.FleetConfig) context.CancelFunc {
-	locker, ok := ds.(Locker)
-	if !ok {
-		initFatal(errors.New("No global locker available"), "")
-	}
+func runCrons(ds fleet.Datastore, task *async.Task, logger kitlog.Logger, config config.FleetConfig, license *fleet.LicenseInfo) context.CancelFunc {
 	ctx, cancelBackground := context.WithCancel(context.Background())
 
 	ourIdentifier, err := server.GenerateRandomText(64)
@@ -455,46 +533,68 @@ func runCrons(ds fleet.Datastore, logger kitlog.Logger, config config.FleetConfi
 		initFatal(errors.New("Error generating random instance identifier"), "")
 	}
 
-	go cronCleanups(ctx, ds, kitlog.With(logger, "cron", "cleanups"), locker, ourIdentifier)
+	// StartCollectors starts a goroutine per collector, using ctx to cancel.
+	task.StartCollectors(ctx, config.Osquery.AsyncHostCollectInterval,
+		config.Osquery.AsyncHostCollectMaxJitterPercent, kitlog.With(logger, "cron", "async_task"))
+
+	go cronCleanups(ctx, ds, kitlog.With(logger, "cron", "cleanups"), ourIdentifier, license)
 	go cronVulnerabilities(
-		ctx, ds, kitlog.With(logger, "cron", "vulnerabilities"), locker, ourIdentifier, config)
+		ctx, ds, kitlog.With(logger, "cron", "vulnerabilities"), ourIdentifier, config)
+	go cronWebhooks(ctx, ds, kitlog.With(logger, "cron", "webhooks"), ourIdentifier)
 
 	return cancelBackground
 }
 
-func cronCleanups(ctx context.Context, ds fleet.Datastore, logger kitlog.Logger, locker Locker, identifier string) {
-	ticker := time.NewTicker(1 * time.Hour)
+func cronCleanups(ctx context.Context, ds fleet.Datastore, logger kitlog.Logger, identifier string, license *fleet.LicenseInfo) {
+	ticker := time.NewTicker(10 * time.Second)
 	for {
 		level.Debug(logger).Log("waiting", "on ticker")
 		select {
 		case <-ticker.C:
 			level.Debug(logger).Log("waiting", "done")
+			ticker.Reset(1 * time.Hour)
 		case <-ctx.Done():
 			level.Debug(logger).Log("exit", "done with cron.")
-			break
+			return
 		}
-		if locked, err := locker.Lock(lockKeyLeader, identifier, time.Hour); err != nil || !locked {
+		if locked, err := ds.Lock(ctx, lockKeyLeader, identifier, time.Hour); err != nil || !locked {
 			level.Debug(logger).Log("leader", "Not the leader. Skipping...")
 			continue
 		}
-		_, err := ds.CleanupDistributedQueryCampaigns(time.Now())
+		_, err := ds.CleanupDistributedQueryCampaigns(ctx, time.Now())
 		if err != nil {
 			level.Error(logger).Log("err", "cleaning distributed query campaigns", "details", err)
 		}
-		err = ds.CleanupIncomingHosts(time.Now())
+		err = ds.CleanupIncomingHosts(ctx, time.Now())
 		if err != nil {
 			level.Error(logger).Log("err", "cleaning incoming hosts", "details", err)
 		}
-		_, err = ds.CleanupCarves(time.Now())
+		_, err = ds.CleanupCarves(ctx, time.Now())
 		if err != nil {
 			level.Error(logger).Log("err", "cleaning carves", "details", err)
 		}
-		err = ds.CleanupOrphanScheduledQueryStats()
+		err = ds.CleanupOrphanScheduledQueryStats(ctx)
 		if err != nil {
 			level.Error(logger).Log("err", "cleaning scheduled query stats", "details", err)
 		}
+		err = ds.CleanupOrphanLabelMembership(ctx)
+		if err != nil {
+			level.Error(logger).Log("err", "cleaning label_membership", "details", err)
+		}
+		err = ds.UpdateQueryAggregatedStats(ctx)
+		if err != nil {
+			level.Error(logger).Log("err", "aggregating query stats", "details", err)
+		}
+		err = ds.UpdateScheduledQueryAggregatedStats(ctx)
+		if err != nil {
+			level.Error(logger).Log("err", "aggregating scheduled query stats", "details", err)
+		}
+		err = ds.CleanupExpiredHosts(ctx)
+		if err != nil {
+			level.Error(logger).Log("err", "cleaning expired hosts", "details", err)
+		}
 
-		err = trySendStatistics(ds, fleet.StatisticsFrequency, "https://fleetdm.com/api/v1/webhooks/receive-usage-analytics")
+		err = trySendStatistics(ctx, ds, fleet.StatisticsFrequency, "https://fleetdm.com/api/v1/webhooks/receive-usage-analytics", license)
 		if err != nil {
 			level.Error(logger).Log("err", "sending statistics", "details", err)
 		}
@@ -506,7 +606,6 @@ func cronVulnerabilities(
 	ctx context.Context,
 	ds fleet.Datastore,
 	logger kitlog.Logger,
-	locker Locker,
 	identifier string,
 	config config.FleetConfig,
 ) {
@@ -515,18 +614,22 @@ func cronVulnerabilities(
 		return
 	}
 
-	appConfig, err := ds.AppConfig()
+	appConfig, err := ds.AppConfig(ctx)
 	if err != nil {
 		level.Error(logger).Log("config", "couldn't read app config", "err", err)
 		return
 	}
-	if ptr.StringValueOrZero(appConfig.VulnerabilityDatabasesPath) == "" &&
+	if appConfig.VulnerabilitySettings.DatabasesPath == "" &&
 		config.Vulnerabilities.DatabasesPath == "" {
 		level.Info(logger).Log("vulnerability scanning", "not configured")
 		return
 	}
+	if !appConfig.HostSettings.EnableSoftwareInventory {
+		level.Info(logger).Log("software inventory", "not configured")
+		return
+	}
 
-	vulnPath := ptr.StringValueOrZero(appConfig.VulnerabilityDatabasesPath)
+	vulnPath := appConfig.VulnerabilitySettings.DatabasesPath
 	if vulnPath == "" {
 		vulnPath = config.Vulnerabilities.DatabasesPath
 	}
@@ -540,6 +643,15 @@ func cronVulnerabilities(
 	level.Info(logger).Log("databases-path", vulnPath)
 	level.Info(logger).Log("periodicity", config.Vulnerabilities.Periodicity)
 
+	if config.Vulnerabilities.CurrentInstanceChecks == "auto" {
+		level.Debug(logger).Log("current instance checks", "auto", "trying to create databases-path", vulnPath)
+		err := os.MkdirAll(vulnPath, 0o755)
+		if err != nil {
+			level.Error(logger).Log("databases-path", "creation failed, returning", "err", err)
+			return
+		}
+	}
+
 	ticker := time.NewTicker(10 * time.Second)
 	for {
 		level.Debug(logger).Log("waiting", "on ticker")
@@ -549,25 +661,68 @@ func cronVulnerabilities(
 			ticker.Reset(config.Vulnerabilities.Periodicity)
 		case <-ctx.Done():
 			level.Debug(logger).Log("exit", "done with cron.")
-			break
+			return
 		}
 		if config.Vulnerabilities.CurrentInstanceChecks == "auto" {
-			if locked, err := locker.Lock(lockKeyVulnerabilities, identifier, time.Hour); err != nil || !locked {
+			if locked, err := ds.Lock(ctx, lockKeyVulnerabilities, identifier, time.Hour); err != nil || !locked {
 				level.Debug(logger).Log("leader", "Not the leader. Skipping...")
 				continue
 			}
 		}
 
-		err := vulnerabilities.TranslateSoftwareToCPE(ds, vulnPath, logger, config.Vulnerabilities.CPEDatabaseURL)
+		err := vulnerabilities.TranslateSoftwareToCPE(ctx, ds, vulnPath, logger, config)
 		if err != nil {
 			level.Error(logger).Log("msg", "analyzing vulnerable software: Software->CPE", "err", err)
 			continue
 		}
 
-		err = vulnerabilities.TranslateCPEToCVE(ctx, ds, vulnPath, logger, config.Vulnerabilities.CVEFeedPrefixURL)
+		err = vulnerabilities.TranslateCPEToCVE(ctx, ds, vulnPath, logger, config)
 		if err != nil {
 			level.Error(logger).Log("msg", "analyzing vulnerable software: CPE->CVE", "err", err)
 			continue
+		}
+
+		level.Debug(logger).Log("loop", "done")
+	}
+}
+
+func cronWebhooks(ctx context.Context, ds fleet.Datastore, logger kitlog.Logger, identifier string) {
+	appConfig, err := ds.AppConfig(ctx)
+	if err != nil {
+		level.Error(logger).Log("config", "couldn't read app config", "err", err)
+		return
+	}
+
+	interval := appConfig.WebhookSettings.Interval.ValueOr(24 * time.Hour)
+	level.Debug(logger).Log("interval", interval.String())
+	ticker := time.NewTicker(interval)
+	for {
+		level.Debug(logger).Log("waiting", "on ticker")
+		select {
+		case <-ticker.C:
+			level.Debug(logger).Log("waiting", "done")
+		case <-ctx.Done():
+			level.Debug(logger).Log("exit", "done with cron.")
+			return
+		}
+		if locked, err := ds.Lock(ctx, lockKeyWebhooks, identifier, interval); err != nil || !locked {
+			level.Debug(logger).Log("leader", "Not the leader. Skipping...")
+			continue
+		}
+
+		err := webhooks.TriggerHostStatusWebhook(
+			ctx, ds, kitlog.With(logger, "webhook", "host_status"), appConfig)
+		if err != nil {
+			level.Error(logger).Log("err", "triggering host status webhook", "details", err)
+		}
+
+		// Reread app config to be able to change interval somewhat on the fly
+		appConfig, err = ds.AppConfig(ctx)
+		if err != nil {
+			level.Error(logger).Log("config", "couldn't read app config", "err", err)
+		} else {
+			interval = appConfig.WebhookSettings.Interval.ValueOr(24 * time.Hour)
+			ticker.Reset(interval)
 		}
 
 		level.Debug(logger).Log("loop", "done")
@@ -621,7 +776,7 @@ func getTLSConfig(profile string) *tls.Config {
 		)
 	default:
 		initFatal(
-			errors.Errorf("%s is invalid", profile),
+			fmt.Errorf("%s is invalid", profile),
 			"set TLS profile",
 		)
 	}

@@ -2,12 +2,13 @@
 // disable this rule as it was throwing an error in Header and Cell component
 // definitions for the selection row for some reason when we dont really need it.
 import React from "react";
-import { secondsToDhms } from "fleet/helpers";
+import { performanceIndicator, secondsToDhms } from "fleet/helpers";
 
 // @ts-ignore
 import Checkbox from "components/forms/fields/Checkbox";
 import TextCell from "components/TableContainer/DataTable/TextCell";
 import DropdownCell from "components/TableContainer/DataTable/DropdownCell";
+import PillCell from "components/TableContainer/DataTable/PillCell";
 import { IDropdownOption } from "interfaces/dropdownOption";
 import { IGlobalScheduledQuery } from "interfaces/global_scheduled_query";
 import { ITeamScheduledQuery } from "interfaces/team_scheduled_query";
@@ -83,7 +84,7 @@ const generateTableHeaders = (
       title: "Query",
       Header: "Query",
       disableSortBy: true,
-      accessor: "name",
+      accessor: "query_name",
       Cell: (cellProps: ICellProps): JSX.Element => (
         <TextCell value={cellProps.cell.value} />
       ),
@@ -96,6 +97,13 @@ const generateTableHeaders = (
       Cell: (cellProps: ICellProps): JSX.Element => (
         <TextCell value={secondsToDhms(cellProps.cell.value)} />
       ),
+    },
+    {
+      title: "Performance impact",
+      Header: "Performance impact",
+      disableSortBy: true,
+      accessor: "performance",
+      Cell: (cellProps) => <PillCell value={cellProps.cell.value} />,
     },
     {
       title: "Actions",
@@ -111,6 +119,36 @@ const generateTableHeaders = (
           placeholder={"Actions"}
         />
       ),
+    },
+  ];
+};
+
+const generateInheritedQueriesTableHeaders = (): IDataColumn[] => {
+  return [
+    {
+      title: "Query",
+      Header: "Query",
+      disableSortBy: true,
+      accessor: "query_name",
+      Cell: (cellProps: ICellProps): JSX.Element => (
+        <TextCell value={cellProps.cell.value} />
+      ),
+    },
+    {
+      title: "Frequency",
+      Header: "Frequency",
+      disableSortBy: true,
+      accessor: "interval",
+      Cell: (cellProps: ICellProps): JSX.Element => (
+        <TextCell value={secondsToDhms(cellProps.cell.value)} />
+      ),
+    },
+    {
+      title: "Performance impact",
+      Header: "Performance impact",
+      disableSortBy: true,
+      accessor: "performance",
+      Cell: (cellProps) => <PillCell value={cellProps.cell.value} />,
     },
   ];
 };
@@ -133,12 +171,18 @@ const generateActionDropdownOptions = (): IDropdownOption[] => {
 
 const enhanceAllScheduledQueryData = (
   all_scheduled_queries: IGlobalScheduledQuery[] | ITeamScheduledQuery[],
-  teamId: number
+  teamId: number | undefined
 ): IAllScheduledQueryTableData[] => {
   return all_scheduled_queries.map(
     (all_scheduled_query: IGlobalScheduledQuery | ITeamScheduledQuery) => {
+      const scheduledQueryPerformance = {
+        user_time_p50: all_scheduled_query.stats?.user_time_p50,
+        system_time_p50: all_scheduled_query.stats?.system_time_p50,
+        total_executions: all_scheduled_query.stats?.total_executions,
+      };
       return {
         name: all_scheduled_query.name,
+        query_name: all_scheduled_query.query_name,
         interval: all_scheduled_query.interval,
         actions: generateActionDropdownOptions(),
         id: all_scheduled_query.id,
@@ -149,6 +193,10 @@ const enhanceAllScheduledQueryData = (
         version: all_scheduled_query.version,
         shard: all_scheduled_query.shard,
         type: teamId ? "team_scheduled_query" : "global_scheduled_query",
+        performance: [
+          performanceIndicator(scheduledQueryPerformance),
+          all_scheduled_query.id,
+        ],
       };
     }
   );
@@ -156,9 +204,13 @@ const enhanceAllScheduledQueryData = (
 
 const generateDataSet = (
   all_scheduled_queries: IGlobalScheduledQuery[],
-  teamId: number
+  teamId: number | undefined
 ): IAllScheduledQueryTableData[] => {
   return [...enhanceAllScheduledQueryData(all_scheduled_queries, teamId)];
 };
 
-export { generateTableHeaders, generateDataSet };
+export {
+  generateInheritedQueriesTableHeaders,
+  generateTableHeaders,
+  generateDataSet,
+};

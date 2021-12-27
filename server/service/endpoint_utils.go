@@ -4,16 +4,17 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/fleetdm/fleet/v4/server/fleet"
-	"github.com/go-kit/kit/endpoint"
 	kithttp "github.com/go-kit/kit/transport/http"
-	"github.com/pkg/errors"
+	"github.com/gorilla/mux"
 )
 
 type handlerFunc func(ctx context.Context, request interface{}, svc fleet.Service) (interface{}, error)
@@ -23,13 +24,13 @@ func parseTag(tag string) (string, bool, error) {
 	parts := strings.Split(tag, ",")
 	switch len(parts) {
 	case 0:
-		return "", false, errors.Errorf("Error parsing %s: too few parts", tag)
+		return "", false, fmt.Errorf("Error parsing %s: too few parts", tag)
 	case 1:
 		return tag, false, nil
 	case 2:
 		return parts[0], parts[1] == "optional", nil
 	default:
-		return "", false, errors.Errorf("Error parsing %s: too many parts", tag)
+		return "", false, fmt.Errorf("Error parsing %s: too many parts", tag)
 	}
 }
 
@@ -70,6 +71,11 @@ func allFields(ifv reflect.Value) []reflect.StructField {
 // IDs are expected to be uint, and can be optional by setting the tag as follows: `url:"some-id,optional"`
 // list-options are optional by default and it'll ignore the optional portion of the tag.
 func makeDecoder(iface interface{}) kithttp.DecodeRequestFunc {
+	if iface == nil {
+		return func(ctx context.Context, r *http.Request) (interface{}, error) {
+			return nil, nil
+		}
+	}
 	t := reflect.TypeOf(iface)
 	if t.Kind() != reflect.Struct {
 		panic(fmt.Sprintf("makeDecoder only understands structs, not %T", iface))
@@ -102,29 +108,104 @@ func makeDecoder(iface interface{}) kithttp.DecodeRequestFunc {
 				if err != nil {
 					return nil, err
 				}
-			}
 
-			if ok && urlTagValue == "list_options" {
-				opts, err := listOptionsFromRequest(r)
-				if err != nil {
-					return nil, err
-				}
-				field.Set(reflect.ValueOf(opts))
-				continue
-			}
+				switch urlTagValue {
+				case "list_options":
+					opts, err := listOptionsFromRequest(r)
+					if err != nil {
+						return nil, err
+					}
+					field.Set(reflect.ValueOf(opts))
+				case "host_options":
+					opts, err := hostListOptionsFromRequest(r)
+					if err != nil {
+						return nil, err
+					}
+					field.Set(reflect.ValueOf(opts))
+				case "carve_options":
+					opts, err := carveListOptionsFromRequest(r)
+					if err != nil {
+						return nil, err
+					}
+					field.Set(reflect.ValueOf(opts))
+				default:
+					id, err := idFromRequest(r, urlTagValue)
+					if err != nil {
+						if err == errBadRoute && optional {
+							continue
+						}
 
-			if ok {
-				id, err := idFromRequest(r, urlTagValue)
-				if err != nil && err == errBadRoute && !optional {
-					return nil, err
+						return nil, err
+					}
+					if field.Kind() == reflect.Int64 {
+						field.SetInt(int64(id))
+					} else {
+						field.SetUint(uint64(id))
+					}
 				}
-				field.SetUint(uint64(id))
-				continue
 			}
 
 			_, jsonExpected := f.Tag.Lookup("json")
 			if jsonExpected && nilBody {
 				return nil, errors.New("Expected JSON Body")
+			}
+
+			queryTagValue, ok := f.Tag.Lookup("query")
+
+			if ok {
+				queryTagValue, optional, err = parseTag(queryTagValue)
+				if err != nil {
+					return nil, err
+				}
+				queryVal := r.URL.Query().Get(queryTagValue)
+				// if optional and it's a ptr, leave as nil
+				if queryVal == "" {
+					if optional {
+						continue
+					}
+					return nil, fmt.Errorf("Param %s is required", f.Name)
+				}
+				if field.Kind() == reflect.Ptr {
+					// create the new instance of whatever it is
+					field.Set(reflect.New(field.Type().Elem()))
+					field = field.Elem()
+				}
+				switch field.Kind() {
+				case reflect.String:
+					field.SetString(queryVal)
+				case reflect.Uint:
+					queryValUint, err := strconv.Atoi(queryVal)
+					if err != nil {
+						return nil, fmt.Errorf("parsing uint from query: %w", err)
+					}
+					field.SetUint(uint64(queryValUint))
+				case reflect.Bool:
+					field.SetBool(queryVal == "1" || queryVal == "true")
+				case reflect.Int:
+					queryValInt := 0
+					switch queryTagValue {
+					case "order_direction":
+						switch queryVal {
+						case "desc":
+							queryValInt = int(fleet.OrderDescending)
+						case "asc":
+							queryValInt = int(fleet.OrderAscending)
+						case "":
+							queryValInt = int(fleet.OrderAscending)
+						default:
+							return fleet.ListOptions{},
+								errors.New("unknown order_direction: " + queryVal)
+						}
+					default:
+						queryValInt, err = strconv.Atoi(queryVal)
+						if err != nil {
+							return nil, fmt.Errorf("parsing uint from query: %w", err)
+						}
+					}
+					field.SetInt(int64(queryValInt))
+				default:
+					return nil, fmt.Errorf("Cant handle type for field %s %s", f.Name, field.Kind())
+				}
 			}
 		}
 
@@ -132,12 +213,48 @@ func makeDecoder(iface interface{}) kithttp.DecodeRequestFunc {
 	}
 }
 
-func makeAuthenticatedServiceEndpoint(svc fleet.Service, f handlerFunc) endpoint.Endpoint {
-	return authenticatedUser(svc, makeServiceEndpoint(svc, f))
+type UserAuthEndpointer struct {
+	svc  fleet.Service
+	opts []kithttp.ServerOption
+	r    *mux.Router
 }
 
-func makeServiceEndpoint(svc fleet.Service, f handlerFunc) endpoint.Endpoint {
-	return func(ctx context.Context, request interface{}) (interface{}, error) {
-		return f(ctx, request, svc)
-	}
+func NewUserAuthenticatedEndpointer(svc fleet.Service, opts []kithttp.ServerOption, r *mux.Router) *UserAuthEndpointer {
+	return &UserAuthEndpointer{svc: svc, opts: opts, r: r}
+}
+
+func getNameFromPathAndVerb(verb, path string) string {
+	return strings.ToLower(verb) + "_" + strings.ReplaceAll(strings.TrimSuffix("/api/v1/fleet/", strings.TrimRight(path, "/")), "/", "_")
+}
+
+func (e *UserAuthEndpointer) POST(path string, f handlerFunc, v interface{}) {
+	e.handle(path, f, v, "POST")
+}
+
+func (e *UserAuthEndpointer) GET(path string, f handlerFunc, v interface{}) {
+	e.handle(path, f, v, "GET")
+}
+
+func (e *UserAuthEndpointer) PATCH(path string, f handlerFunc, v interface{}) {
+	e.handle(path, f, v, "PATCH")
+}
+
+func (e *UserAuthEndpointer) DELETE(path string, f handlerFunc, v interface{}) {
+	e.handle(path, f, v, "DELETE")
+}
+
+func (e *UserAuthEndpointer) handle(path string, f handlerFunc, v interface{}, verb string) *mux.Route {
+	return e.r.Handle(path, e.makeEndpoint(f, v)).Methods(verb).Name(getNameFromPathAndVerb(verb, path))
+}
+
+func (e *UserAuthEndpointer) makeEndpoint(f handlerFunc, v interface{}) http.Handler {
+	return newServer(
+		authenticatedUser(
+			e.svc,
+			func(ctx context.Context, request interface{}) (interface{}, error) {
+				return f(ctx, request, e.svc)
+			}),
+		makeDecoder(v),
+		e.opts,
+	)
 }

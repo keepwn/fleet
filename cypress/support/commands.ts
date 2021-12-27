@@ -27,8 +27,13 @@ import "cypress-wait-until";
 // -- This will overwrite an existing command --
 // Cypress.Commands.overwrite("visit", (originalFn, url, options) => { ... })
 
+const SHELL = Cypress.platform === "win32" ? "cmd" : "bash";
+
 Cypress.Commands.add("setup", () => {
-  cy.exec("make e2e-reset-db e2e-setup", { timeout: 20000 });
+  cy.exec("make e2e-reset-db e2e-setup", {
+    timeout: 20000,
+    env: { SHELL },
+  });
 });
 
 Cypress.Commands.add("login", (email, password) => {
@@ -69,6 +74,14 @@ Cypress.Commands.add("seedQueries", () => {
       query:
         "SELECT * FROM users CROSS JOIN authorized_keys USING(uid) WHERE username IN (SELECT distinct(username) FROM last);",
       description: "List authorized_keys for each user on the system.",
+      observer_can_run: false,
+    },
+    {
+      name:
+        "Detect Linux hosts with high severity vulnerable versions of OpenSSL",
+      query:
+        "SELECT name AS name, version AS version, 'deb_packages' AS source FROM deb_packages WHERE name LIKE 'openssl%' UNION SELECT name AS name, version AS version, 'apt_sources' AS source FROM apt_sources WHERE name LIKE 'openssl%' UNION SELECT name AS name, version AS version, 'rpm_packages' AS source FROM rpm_packages WHERE name LIKE 'openssl%';",
+      description: "Retrieves the OpenSSL version.",
       observer_can_run: false,
     },
   ];
@@ -138,7 +151,7 @@ Cypress.Commands.add("loginSSO", () => {
       "http://localhost:9080/simplesaml/saml2/idp/SSOService.php?spentityid=https://localhost:8080",
     followRedirect: false,
   }).then((firstResponse) => {
-    const redirect = firstResponse.headers.location;
+    const redirect = firstResponse.headers.location as string;
 
     cy.request({
       method: "GET",
@@ -183,28 +196,30 @@ Cypress.Commands.add("getEmails", () => {
     });
 });
 
-Cypress.Commands.add("seedCore", () => {
+Cypress.Commands.add("seedFree", () => {
   const authToken = window.localStorage.getItem("FLEET::auth_token");
-  cy.exec("bash ./tools/api/fleet/teams/create_core", {
+  cy.exec("bash ./tools/api/fleet/teams/create_free", {
     env: {
       TOKEN: authToken,
       CURL_FLAGS: "-k",
       SERVER_URL: Cypress.config().baseUrl,
       // clear any value for FLEET_ENV_PATH since we set the environment explicitly just above
       FLEET_ENV_PATH: "",
+      SHELL,
     },
   });
 });
 
-Cypress.Commands.add("seedBasic", () => {
+Cypress.Commands.add("seedPremium", () => {
   const authToken = window.localStorage.getItem("FLEET::auth_token");
-  cy.exec("bash ./tools/api/fleet/teams/create_basic", {
+  cy.exec("bash ./tools/api/fleet/teams/create_premium", {
     env: {
       TOKEN: authToken,
       CURL_FLAGS: "-k",
       SERVER_URL: Cypress.config().baseUrl,
       // clear any value for FLEET_ENV_PATH since we set the environment explicitly just above
       FLEET_ENV_PATH: "",
+      SHELL,
     },
   });
 });
@@ -218,6 +233,7 @@ Cypress.Commands.add("seedFigma", () => {
       SERVER_URL: Cypress.config().baseUrl,
       // clear any value for FLEET_ENV_PATH since we set the environment explicitly just above
       FLEET_ENV_PATH: "",
+      SHELL,
     },
   });
 });
@@ -230,11 +246,14 @@ Cypress.Commands.add("addUser", (options = {}) => {
 
   cy.exec(
     `./build/fleetctl user create --context e2e --password "${password}" --email "${email}" --global-role "${globalRole}"`,
-    { timeout: 5000 }
+    {
+      timeout: 5000,
+      env: { SHELL },
+    }
   );
 });
 
-// Ability to add a docker host to a team using args if ran after seedBasic()
+// Ability to add a docker host to a team using args if ran after seedPremium()
 Cypress.Commands.add("addDockerHost", (team = "") => {
   const serverPort = new URL(Cypress.config().baseUrl).port;
   // Get enroll secret
@@ -261,6 +280,7 @@ Cypress.Commands.add("addDockerHost", (team = "") => {
         env: {
           ENROLL_SECRET: enrollSecret,
           FLEET_SERVER: `host.docker.internal:${serverPort}`,
+          SHELL,
         },
       }
     );
@@ -274,6 +294,14 @@ Cypress.Commands.add("stopDockerHost", () => {
       // Not that ENROLL_SECRET must be specified or docker-compose errors,
       // even when just trying to shut down the hosts.
       ENROLL_SECRET: "invalid",
+      SHELL,
     },
   });
+});
+
+Cypress.Commands.add("clearDownloads", () => {
+  // windows has issue with downloads location
+  if (Cypress.platform !== "win32") {
+    cy.exec(`rm -rf ${Cypress.config("downloadsFolder")}`, { env: { SHELL } });
+  }
 });

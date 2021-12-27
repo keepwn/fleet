@@ -1,6 +1,5 @@
 .user-management {
-  padding: $pad-xlarge;
-
+  padding: 0;
   &__page-description {
     font-size: $x-small;
     color: $core-fleet-black;
@@ -125,7 +124,8 @@
     }
 
     .grey-cell {
-      color: $ui-fleet-black-25;
+      color: $ui-fleet-black-50;
+      font-style: italic;
     }
   }
 }

@@ -7,7 +7,7 @@ import { itBehavesLikeAFormInputElement } from "test/helpers";
 
 describe("AppConfigForm - form", () => {
   const defaultProps = {
-    formData: { org_name: "Kolide" },
+    formData: { org_name: "Fleet" },
     handleSubmit: noop,
     smtpConfigured: false,
     enrollSecret: [
@@ -18,31 +18,31 @@ describe("AppConfigForm - form", () => {
   };
   const form = mount(<AppConfigForm {...defaultProps} />);
 
-  describe("Organization Name input", () => {
+  describe("Organization name input", () => {
     it("renders an input field", () => {
       itBehavesLikeAFormInputElement(form, "org_name");
     });
   });
 
-  describe("Organization Avatar input", () => {
+  describe("Organization avatar input", () => {
     it("renders an input field", () => {
       itBehavesLikeAFormInputElement(form, "org_logo_url");
     });
   });
 
-  describe("Fleet App URL input", () => {
+  describe("Fleet app URL input", () => {
     it("renders an input field", () => {
       itBehavesLikeAFormInputElement(form, "server_url");
     });
   });
 
-  describe("Sender Address input", () => {
+  describe("Sender address input", () => {
     it("renders an input field", () => {
       itBehavesLikeAFormInputElement(form, "sender_address");
     });
   });
 
-  describe("SMTP Server input", () => {
+  describe("SMTP server input", () => {
     it("renders an input field", () => {
       itBehavesLikeAFormInputElement(form, "server");
     });
@@ -78,27 +78,13 @@ describe("AppConfigForm - form", () => {
     });
   });
 
-  describe("Enroll Secret", () => {
+  describe("Enroll secret", () => {
     it("renders enroll secrets table", () => {
       expect(form.find("EnrollSecretTable").length).toEqual(1);
     });
   });
 
-  it("does not render advanced options by default", () => {
-    expect(form.find({ name: "domain" }).length).toEqual(0);
-    expect(form.find("Slider").length).toEqual(0);
-  });
-
   describe("Advanced options", () => {
-    beforeAll(() => {
-      form.find(".app-config-form__show-options").simulate("click");
-    });
-
-    it('renders advanced options when "Advanced Options" is clicked', () => {
-      expect(form.find({ name: "domain" }).hostNodes().length).toEqual(1);
-      expect(form.find("Slider").length).toEqual(4);
-    });
-
     it("disables host expiry window by default", () => {
       const InputField = form.find({ name: "host_expiry_window" });
       const inputElement = InputField.find("input");
@@ -109,11 +95,11 @@ describe("AppConfigForm - form", () => {
     it("enables host expiry window", () => {
       form
         .find({ name: "host_expiry_enabled" })
-        .find("button")
+        .find("Checkbox")
         .simulate("click");
       const InputField = form.find({ name: "host_expiry_window" });
       const inputElement = InputField.find("input");
-      expect(inputElement.hasClass("input-field--disabled")).toBe(false);
+      expect(inputElement.hasClass("input-field--disabled")).toBe(true);
     });
 
     it("renders live query disabled input", () => {

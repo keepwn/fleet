@@ -22,6 +22,10 @@ export default (formData) => {
     host_expiry_enabled: hostExpiryEnabled,
     host_expiry_window: hostExpiryWindow = 0,
     agent_options: agentOptions,
+    enable_host_status_webhook: enableHostStatusWebhook,
+    destination_url: destinationUrl,
+    host_percentage: hostPercentage,
+    days_count: daysCount,
   } = formData;
 
   if (enableSSO) {
@@ -37,41 +41,55 @@ export default (formData) => {
   }
 
   if (!kolideServerUrl) {
-    errors.server_url = "Fleet Server URL must be present";
+    errors.server_url = "Fleet server URL must be present";
   }
 
   if (!orgName) {
-    errors.org_name = "Organization Name must be present";
+    errors.org_name = "Organization name must be present";
   }
 
   if (enableSMTP) {
     if (!smtpSenderAddress) {
-      errors.sender_address = "SMTP Sender Address must be present";
+      errors.sender_address = "SMTP sender address must be present";
     }
 
     if (!smtpServer) {
-      errors.server = "SMTP Server must be present";
+      errors.server = "SMTP server must be present";
     }
 
     if (!smtpServerPort) {
-      errors.server = "SMTP Server Port must be present";
+      errors.server = "SMTP server port must be present";
     }
 
     if (authType !== "authtype_none") {
       if (!smtpUserName) {
-        errors.user_name = "SMTP Username must be present";
+        errors.user_name = "SMTP username must be present";
       }
 
       if (!smtpPassword) {
-        errors.password = "SMTP Password must be present";
+        errors.password = "SMTP password must be present";
       }
+    }
+  }
+
+  if (enableHostStatusWebhook) {
+    if (!destinationUrl) {
+      errors.destination_url = "Destination URL must be present";
+    }
+
+    if (!hostPercentage) {
+      errors.host_percentage = "Host percentage must be present";
+    }
+
+    if (!daysCount) {
+      errors.days_count = "Days count must be present";
     }
   }
 
   if (hostExpiryEnabled) {
     if (isNaN(hostExpiryWindow) || Number(hostExpiryWindow) <= 0) {
       errors.host_expiry_window =
-        "Host Expiry Window must be a positive number";
+        "Host expiry window must be a positive number";
     }
   }
 

@@ -4,90 +4,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
-	"strings"
+	"sync"
 	"time"
 
+	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
+	"github.com/fleetdm/fleet/v4/server/datastore/redis"
 	"github.com/fleetdm/fleet/v4/server/fleet"
-	"github.com/gomodule/redigo/redis"
-	"github.com/mna/redisc"
-	"github.com/pkg/errors"
+	redigo "github.com/gomodule/redigo/redis"
 )
 
 type redisQueryResults struct {
 	// connection pool
-	pool             *redisc.Cluster
+	pool             fleet.RedisPool
 	duplicateResults bool
 }
 
 var _ fleet.QueryResultStore = &redisQueryResults{}
 
-// NewRedisPool creates a Redis connection pool using the provided server
-// address, password and database.
-func NewRedisPool(server, password string, database int, useTLS bool) (*redisc.Cluster, error) {
-	//Create the Cluster
-	cluster := &redisc.Cluster{
-		StartupNodes: []string{
-			fmt.Sprint(server),
-		},
-		CreatePool: func(server string, opts ...redis.DialOption) (*redis.Pool, error) {
-			return &redis.Pool{
-				MaxIdle:     3,
-				IdleTimeout: 240 * time.Second,
-				Dial: func() (redis.Conn, error) {
-					c, err := redis.Dial(
-						"tcp",
-						server,
-						redis.DialDatabase(database),
-						redis.DialUseTLS(useTLS),
-						redis.DialConnectTimeout(5*time.Second),
-						redis.DialKeepAlive(10*time.Second),
-						// Read/Write timeouts not set here because we may see results
-						// only rarely on the pub/sub channel.
-					)
-					if err != nil {
-						return nil, err
-					}
-					if password != "" {
-						if _, err := c.Do("AUTH", password); err != nil {
-							c.Close()
-							return nil, err
-						}
-					}
-					return c, err
-				},
-				TestOnBorrow: func(c redis.Conn, t time.Time) error {
-					if time.Since(t) < time.Minute {
-						return nil
-					}
-					_, err := c.Do("PING")
-					return err
-				},
-			}, nil
-		},
-	}
-
-	if err := cluster.Refresh(); err != nil && !isClusterDisabled(err) && !isClusterCommandUnknown(err) {
-		return nil, errors.Wrap(err, "refresh cluster")
-	}
-
-	return cluster, nil
-}
-
-func isClusterDisabled(err error) bool {
-	return strings.Contains(err.Error(), "ERR This instance has cluster support disabled")
-}
-
-// On GCP Memorystore the CLUSTER command is entirely unavailable and fails with
-// this error. See
-// https://cloud.google.com/memorystore/docs/redis/product-constraints#blocked_redis_commands
-func isClusterCommandUnknown(err error) bool {
-	return strings.Contains(err.Error(), "ERR unknown command `CLUSTER`")
-}
-
 // NewRedisQueryResults creats a new Redis implementation of the
 // QueryResultStore interface using the provided Redis connection pool.
-func NewRedisQueryResults(pool *redisc.Cluster, duplicateResults bool) *redisQueryResults {
+func NewRedisQueryResults(pool fleet.RedisPool, duplicateResults bool) *redisQueryResults {
 	return &redisQueryResults{pool: pool, duplicateResults: duplicateResults}
 }
 
@@ -95,31 +31,34 @@ func pubSubForID(id uint) string {
 	return fmt.Sprintf("results_%d", id)
 }
 
-func (r *redisQueryResults) Pool() *redisc.Cluster {
+// Pool returns the redisc connection pool (used in tests).
+func (r *redisQueryResults) Pool() fleet.RedisPool {
 	return r.pool
 }
 
 func (r *redisQueryResults) WriteResult(result fleet.DistributedQueryResult) error {
-	conn := r.pool.Get()
+	// pub-sub can publish and listen on any node in the cluster
+	conn := redis.ReadOnlyConn(r.pool, r.pool.Get())
 	defer conn.Close()
 
 	channelName := pubSubForID(result.DistributedQueryCampaignID)
 
 	jsonVal, err := json.Marshal(&result)
 	if err != nil {
-		return errors.Wrap(err, "marshalling JSON for result")
+		return fmt.Errorf("marshalling JSON for result: %w", err)
 	}
 
-	n, err := redis.Int(conn.Do("PUBLISH", channelName, string(jsonVal)))
+	hasSubs, err := redis.PublishHasListeners(r.pool, conn, channelName, string(jsonVal))
 
-	if n != 0 && r.duplicateResults {
-		redis.Int(conn.Do("PUBLISH", "LQDuplicate", string(jsonVal)))
+	if hasSubs && r.duplicateResults {
+		// Ignore errors, duplicate result publishing is on a "best-effort" basis.
+		_, _ = redigo.Int(conn.Do("PUBLISH", "LQDuplicate", string(jsonVal)))
 	}
 
 	if err != nil {
-		return errors.Wrap(err, "PUBLISH failed to channel "+channelName)
+		return fmt.Errorf("PUBLISH failed to channel "+channelName+": %w", err)
 	}
-	if n == 0 {
+	if !hasSubs {
 		return noSubscriberError{channelName}
 	}
 
@@ -139,47 +78,30 @@ func writeOrDone(ctx context.Context, ch chan<- interface{}, item interface{}) b
 
 // receiveMessages runs in a goroutine, forwarding messages from the Pub/Sub
 // connection over the provided channel. This effectively allows a select
-// statement to run on conn.Receive() (by running on the channel that is being
-// fed by this function)
-func receiveMessages(ctx context.Context, pool *redisc.Cluster, query fleet.DistributedQueryCampaign, outChan chan<- interface{}) {
-	conn := redis.PubSubConn{Conn: pool.Get()}
-	defer conn.Close()
-
-	pubSubName := pubSubForID(query.ID)
-	err := conn.Subscribe(pubSubName)
-	if err != nil && writeOrDone(ctx, outChan, errors.Wrap(err, "subscribe to channel")) {
-		return
-	}
-	defer conn.Unsubscribe(pubSubName)
-
-	defer func() {
-		close(outChan)
-	}()
+// statement to run on conn.Receive() (by selecting on outChan that is
+// passed into this function)
+func receiveMessages(ctx context.Context, conn *redigo.PubSubConn, outChan chan<- interface{}) {
+	defer close(outChan)
 
 	for {
-		// This Receive needs to be with timeout, otherwise we might block on it forever
-		msg := conn.ReceiveWithTimeout(5 * time.Second)
+		// Add a timeout to try to cleanup in the case the server has somehow gone completely unresponsive.
+		msg := conn.ReceiveWithTimeout(1 * time.Hour)
 
-		select {
-		case outChan <- msg:
-			switch msg := msg.(type) {
-			case error:
-				if err, ok := msg.(net.Error); ok && err.Timeout() {
-					// We ignore timeouts, we just want them there to make sure we don't hang on Receiving
-					continue
-				} else {
-					// If an error occurred (i.e. connection was closed), then we should exit
-					return
-				}
-			case redis.Subscription:
-				// If the subscription count is 0, the ReadChannel call that invoked this goroutine has unsubscribed,
-				// and we can exit
-				if msg.Count == 0 {
-					return
-				}
-			}
-		case <-ctx.Done():
+		// Pass the message back to ReadChannel.
+		if writeOrDone(ctx, outChan, msg) {
 			return
+		}
+
+		switch msg := msg.(type) {
+		case error:
+			// If an error occurred (i.e. connection was closed), then we should exit.
+			return
+		case redigo.Subscription:
+			// If the subscription count is 0, the ReadChannel call that invoked this goroutine has unsubscribed,
+			// and we can exit.
+			if msg.Count == 0 {
+				return
+			}
 		}
 	}
 }
@@ -188,11 +110,29 @@ func (r *redisQueryResults) ReadChannel(ctx context.Context, query fleet.Distrib
 	outChannel := make(chan interface{})
 	msgChannel := make(chan interface{})
 
-	// Run a separate goroutine feeding redis messages into
-	// msgChannel
-	go receiveMessages(ctx, r.pool, query, msgChannel)
+	// pub-sub can publish and listen on any node in the cluster
+	conn := redis.ReadOnlyConn(r.pool, r.pool.Get())
+	psc := &redigo.PubSubConn{Conn: conn}
+	pubSubName := pubSubForID(query.ID)
+	if err := psc.Subscribe(pubSubName); err != nil {
+		// Explicit conn.Close() here because we can't defer it until in the goroutine
+		_ = conn.Close()
+		return nil, ctxerr.Wrapf(ctx, err, "subscribe to channel %s", pubSubName)
+	}
 
+	var wg sync.WaitGroup
+
+	// Run a separate goroutine feeding redis messages into msgChannel.
+	wg.Add(+1)
 	go func() {
+		defer wg.Done()
+
+		receiveMessages(ctx, psc, msgChannel)
+	}()
+
+	wg.Add(+1)
+	go func() {
+		defer wg.Done()
 		defer close(outChannel)
 
 		for {
@@ -200,10 +140,12 @@ func (r *redisQueryResults) ReadChannel(ctx context.Context, query fleet.Distrib
 			select {
 			case msg, ok := <-msgChannel:
 				if !ok {
+					writeOrDone(ctx, outChannel, ctxerr.New(ctx, "unexpected exit in receiveMessages"))
 					return
 				}
+
 				switch msg := msg.(type) {
-				case redis.Message:
+				case redigo.Message:
 					var res fleet.DistributedQueryResult
 					err := json.Unmarshal(msg.Data, &res)
 					if err != nil {
@@ -215,16 +157,23 @@ func (r *redisQueryResults) ReadChannel(ctx context.Context, query fleet.Distrib
 						return
 					}
 				case error:
-					if writeOrDone(ctx, outChannel, errors.Wrap(msg, "reading from redis")) {
+					if writeOrDone(ctx, outChannel, ctxerr.Wrap(ctx, msg, "read from redis")) {
 						return
 					}
 				}
+
 			case <-ctx.Done():
 				return
 			}
-
 		}
 	}()
+
+	go func() {
+		wg.Wait()
+		psc.Unsubscribe(pubSubName)
+		conn.Close()
+	}()
+
 	return outChannel, nil
 }
 
@@ -235,7 +184,7 @@ func (r *redisQueryResults) HealthCheck() error {
 	defer conn.Close()
 
 	if _, err := conn.Do("PING"); err != nil {
-		return errors.Wrap(err, "reading from redis")
+		return fmt.Errorf("reading from redis: %w", err)
 	}
 	return nil
 }

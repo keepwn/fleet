@@ -25,19 +25,22 @@ module.exports = {
 
     await sails.helpers.flow.simultaneously([
       async()=>{// Parse query library from YAML and prepare to bake them into the Sails app's configuration.
-        let RELATIVE_PATH_TO_QUERY_LIBRARY_YML_IN_FLEET_REPO = 'docs/1-Using-Fleet/standard-query-library/standard-query-library.yml';
-        let yaml = await sails.helpers.fs.read(path.join(topLvlRepoPath, RELATIVE_PATH_TO_QUERY_LIBRARY_YML_IN_FLEET_REPO));
+        let RELATIVE_PATH_TO_QUERY_LIBRARY_YML_IN_FLEET_REPO = 'docs/01-Using-Fleet/standard-query-library/standard-query-library.yml';
+        let yaml = await sails.helpers.fs.read(path.join(topLvlRepoPath, RELATIVE_PATH_TO_QUERY_LIBRARY_YML_IN_FLEET_REPO)).intercept('doesNotExist', (err)=>new Error(`Could not find standard query library YAML file at "${RELATIVE_PATH_TO_QUERY_LIBRARY_YML_IN_FLEET_REPO}".  Was it accidentally moved?  Raw error: `+err.message));
 
-        let queriesWithProblematicRemediations = [];
+        let queriesWithProblematicResolutions = [];
         let queriesWithProblematicContributors = [];
         let queries = YAML.parseAllDocuments(yaml).map((yamlDocument)=>{
           let query = yamlDocument.toJSON().spec;
+          query.kind = yamlDocument.toJSON().kind;
           query.slug = _.kebabCase(query.name);// « unique slug to use for routing to this query's detail page
-          if ((query.remediation !== undefined && !_.isString(query.remediation)) || (query.purpose !== 'Detection' && _.isString(query.remediation))) {
-            // console.log(typeof query.remediation);
-            queriesWithProblematicRemediations.push(query);
-          } else if (query.remediation === undefined) {
-            query.remediation = 'N/A';// « We set this to a string here so that the data type is always string.  We use N/A so folks can see there's no remediation and contribute if desired.
+          if (false) {
+          // if ((query.resolution !== undefined && !_.isString(query.resolution)) || (query.kind !== 'policy' && _.isString(query.resolution))) { TODO: maybe bring this back later
+            // console.log(typeof query.resolution);
+            queriesWithProblematicResolutions.push(query);
+          // } else if (query.resolution === undefined) {
+          } else { // « For now set resolution to N/A for all queries until we reinstate checks that are commented out above.  TODO: finish that
+            query.resolution = 'N/A';// « We set this to a string here so that the data type is always string.  We use N/A so folks can see there's no remediation and contribute if desired.
           }
 
           // GitHub usernames may only contain alphanumeric characters or single hyphens, and cannot begin or end with a hyphen.
@@ -48,8 +51,8 @@ module.exports = {
           return query;
         });
         // Report any errors that were detected along the way in one fell swoop to avoid endless resubmitting of PRs.
-        if (queriesWithProblematicRemediations.length >= 1) {
-          throw new Error('Failed parsing YAML for query library: The "remediation" of a query should either be absent (undefined) or a single string (not a list of strings).  And "remediation" should only be present when a query\'s purpose is "Detection".  But one or more queries have an invalid "remediation": ' + _.pluck(queriesWithProblematicRemediations, 'slug').sort());
+        if (queriesWithProblematicResolutions.length >= 1) {
+          throw new Error('Failed parsing YAML for query library: The "resolution" of a query should either be absent (undefined) or a single string (not a list of strings).  And "resolution" should only be present when a query\'s kind is "policy".  But one or more queries have an invalid "resolution": ' + _.pluck(queriesWithProblematicResolutions, 'slug').sort());
         }//•
         // Assert uniqueness of slugs.
         if (queries.length !== _.uniq(_.pluck(queries, 'slug')).length) {
@@ -107,7 +110,7 @@ module.exports = {
 
         let SECTION_INFOS_BY_SECTION_REPO_PATHS = {
           'docs/':     { urlPrefix: '/docs', },
-          // 'handbook/': { urlPrefix: '/handbook', }, // TODO: Bring this back when styles are complete (removed from build in the meantime so that sitemap.xml is not incorrect)
+          'handbook/': { urlPrefix: '/handbook', }
         };
         let rootRelativeUrlPathsSeen = [];
         for (let sectionRepoPath of Object.keys(SECTION_INFOS_BY_SECTION_REPO_PATHS)) {// FUTURE: run this in parallel
@@ -194,10 +197,14 @@ module.exports = {
                   /(<code)([^>]*)(>\s*)(\&lt;!-- __LANG=\%\%__ --\&gt;)\s*/gm,
                   '$1 class="nohighlight"$2$3'
                 )
-                .replace(// Finally, nab the rest, leaving the code language as-is.
+                .replace(// Nab the rest, leaving the code language as-is.
                   // $1     $2     $3   $4               $5    $6
                   /(<code)([^>]*)(>\s*)(\&lt;!-- __LANG=\%)([^%]+)(\%__ --\&gt;)\s*/gm,
                   '$1 class="$5"$2$3'
+                )
+                .replace(// Finally, remove any "LANG" markers that have been added inside of a nested code block
+                  /(```)\n\&lt;\!\-+\s\_+LANG\=\%+\_+\s\-+\&gt;/gm,
+                  '$1'
                 )
               );
               htmlString = htmlString.replace(/\(\(([^())]*)\)\)/g, '<bubble type="$1" class="colors"><span is="bubble-heart"></span></bubble>');// « Replace ((bubble))s with HTML. For more background, see https://github.com/fleetdm/fleet/issues/706#issuecomment-884622252
@@ -210,10 +217,14 @@ module.exports = {
                 // -mikermcneil 2021-07-27
                 // ```
                 let referencedPageSourcePath = path.resolve(path.join(topLvlRepoPath, sectionRepoPath, pageRelSourcePath), '../', oldRelPath);
+                let possibleReferencedUrlHash = oldRelPath.match(/(\.md#)([^/]*$)/) ? oldRelPath.match(/(\.md#)([^/]*$)/)[2] : false;
                 let referencedPageNewUrl = 'https://fleetdm.com/' + (
                   (path.relative(topLvlRepoPath, referencedPageSourcePath).replace(/(^|\/)([^/]+)\.[^/]*$/, '$1$2').split(/\//).map((fileOrFolderName) => fileOrFolderName.toLowerCase()).join('/'))
                   .split(/\//).map((fileOrFolderName) => encodeURIComponent(fileOrFolderName.replace(/^[0-9]+[\-]+/,''))).join('/')
                 ).replace(RX_README_FILENAME, '');
+                if(possibleReferencedUrlHash) {
+                  referencedPageNewUrl = referencedPageNewUrl + '#' + encodeURIComponent(possibleReferencedUrlHash);
+                }
                 // console.log(pageRelSourcePath, '»»  '+hrefString+' »»»»    href="'+referencedPageNewUrl+'"');
                 // ```
                 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -223,14 +234,22 @@ module.exports = {
                 // Check if this is an external link (like https://google.com) but that is ALSO not a link
                 // to some page on the destination site where this will be hosted, like `(*.)?fleetdm.com`.
                 // If external, add target="_blank" so the link will open in a new tab.
-                let isExternal = ! hrefString.match(/^href=\"https?:\/\/([^\.]+\.)*fleetdm\.com/g);// « FUTURE: make this smarter with sails.config.baseUrl + _.escapeRegExp()
+                // Note: links to blog.fleetdm.com will be treated as an external link.
+                let isExternal = ! hrefString.match(/^href=\"https?:\/\/([^\.|blog]+\.)*fleetdm\.com/g);// « FUTURE: make this smarter with sails.config.baseUrl + _.escapeRegExp()
+                // Check if this link is to fleetdm.com or www.fleetdm.com.
+                let isBaseUrl = hrefString.match(/^(href="https?:\/\/)([^\.]+\.)*fleetdm\.com"$/g);
                 if (isExternal) {
+
                   return hrefString.replace(/(href="https?:\/\/([^"]+)")/g, '$1 target="_blank"');
                 } else {
                   // Otherwise, change the link to be web root relative.
                   // (e.g. 'href="http://sailsjs.com/documentation/concepts"'' becomes simply 'href="/documentation/concepts"'')
                   // > Note: See the Git version history of "compile-markdown-content.js" in the sailsjs.com website repo for examples of ways this can work across versioned subdomains.
-                  return hrefString.replace(/href="https?:\/\//, '').replace(/^fleetdm\.com/, 'href="');
+                  if (isBaseUrl) {
+                    return hrefString.replace(/href="https?:\/\//, '').replace(/([^\.]+\.)*fleetdm\.com/, 'href="/');
+                  } else {
+                    return hrefString.replace(/href="https?:\/\//, '').replace(/^fleetdm\.com/, 'href="');
+                  }
                 }
 
               });//∞
@@ -291,12 +310,17 @@ module.exports = {
                 await sails.helpers.fs.write(htmlOutputPath, htmlString);
               }
 
+              // Determine the path of the file in the fleet repo so we can link to
+              // the file on github from fleetdm.com (e.g. 01-Using-Fleet/02-fleetctl-CLI.md)
+              let sectionRelativeRepoPath = path.relative(path.join(topLvlRepoPath, sectionRepoPath), path.resolve(pageSourcePath));
+
               // Append to what will become configuration for the Sails app.
               builtStaticContent.markdownPages.push({
                 url: rootRelativeUrlPath,
                 title: pageTitle,
                 lastModifiedAt: lastModifiedAt,
                 htmlId: htmlId,
+                sectionRelativeRepoPath: sectionRelativeRepoPath,
                 meta: _.omit(embeddedMetadata, 'title')
               });
             }

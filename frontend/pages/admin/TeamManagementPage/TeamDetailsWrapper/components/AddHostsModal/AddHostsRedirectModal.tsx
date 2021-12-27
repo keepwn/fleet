@@ -1,6 +1,6 @@
 import React from "react";
 import Button from "components/buttons/Button";
-import Modal from "components/modals/Modal";
+import Modal from "components/Modal";
 
 interface IAddHostsModalProps {
   onCancel: () => void;
@@ -9,9 +9,10 @@ interface IAddHostsModalProps {
 
 const baseClass = "add-hosts-redirect-modal";
 
-const AddHostsRedirectModal = (props: IAddHostsModalProps): JSX.Element => {
-  const { onCancel, onSubmit } = props;
-
+const AddHostsRedirectModal = ({
+  onCancel,
+  onSubmit,
+}: IAddHostsModalProps): JSX.Element => {
   return (
     <Modal title={"Add hosts"} onExit={onCancel} className={baseClass}>
       <div className={`${baseClass}__modal-body`}>

@@ -1,30 +1,22 @@
 import PATHS from "router/paths";
 import URL_PREFIX from "router/url_prefix";
 import permissionUtils from "utilities/permissions";
+import { getSortedTeamOptions } from "fleet/helpers";
 
 export default (currentUser) => {
-  const adminNavItems = [
-    {
-      icon: "settings",
-      name: "Settings",
-      iconName: "settings",
-      location: {
-        regex: new RegExp(`^${URL_PREFIX}/settings/`),
-        pathname: PATHS.ADMIN_SETTINGS,
-      },
-    },
-  ];
-
-  const userNavItems = [
+  const logo = [
     {
       icon: "logo",
       name: "Home",
       iconName: "logo",
       location: {
-        regex: new RegExp(`^${URL_PREFIX}/home/dashboard`),
-        pathname: PATHS.HOMEPAGE,
+        regex: new RegExp(`^${URL_PREFIX}/dashboard`),
+        pathname: PATHS.HOME,
       },
     },
+  ];
+
+  const userNavItems = [
     {
       icon: "hosts",
       name: "Hosts",
@@ -45,7 +37,19 @@ export default (currentUser) => {
     },
   ];
 
-  const globalMaintainerNavItems = [
+  const policiesTab = [
+    {
+      icon: "policies",
+      name: "Policies",
+      iconName: "policies",
+      location: {
+        regex: new RegExp(`^${URL_PREFIX}/(policies)/`),
+        pathname: PATHS.MANAGE_POLICIES,
+      },
+    },
+  ];
+
+  const teamMaintainerNavItems = [
     {
       icon: "packs",
       name: "Schedule",
@@ -57,13 +61,51 @@ export default (currentUser) => {
     },
   ];
 
-  if (permissionUtils.isGlobalAdmin(currentUser)) {
-    return [...userNavItems, ...globalMaintainerNavItems, ...adminNavItems];
+  if (
+    permissionUtils.isAnyTeamAdmin(currentUser) ||
+    permissionUtils.isGlobalAdmin(currentUser)
+  ) {
+    const userAdminTeams = currentUser.teams.filter(
+      (thisTeam) => thisTeam.role === "admin"
+    );
+    const sortedTeams = getSortedTeamOptions(userAdminTeams);
+    const adminNavItems = [
+      {
+        icon: "settings",
+        name: "Settings",
+        iconName: "settings",
+        location: {
+          regex: new RegExp(`^${URL_PREFIX}/settings/`),
+          pathname:
+            currentUser.global_role === "admin"
+              ? PATHS.ADMIN_SETTINGS
+              : `${PATHS.ADMIN_TEAMS}/${sortedTeams[0].value}/members`,
+        },
+      },
+    ];
+    return [
+      ...logo,
+      ...userNavItems,
+      ...teamMaintainerNavItems,
+      ...policiesTab,
+      ...adminNavItems,
+    ];
   }
 
-  if (permissionUtils.isGlobalMaintainer(currentUser)) {
-    return [...userNavItems, ...globalMaintainerNavItems];
+  if (
+    permissionUtils.isGlobalMaintainer(currentUser) ||
+    permissionUtils.isAnyTeamMaintainer(currentUser)
+  ) {
+    return [
+      ...logo,
+      ...userNavItems,
+      ...teamMaintainerNavItems,
+      ...policiesTab,
+    ];
   }
 
-  return userNavItems;
+  if (permissionUtils.isNoAccess(currentUser)) {
+    return [...logo];
+  }
+  return [...logo, ...userNavItems, ...policiesTab];
 };

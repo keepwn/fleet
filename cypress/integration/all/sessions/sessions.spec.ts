@@ -15,11 +15,11 @@ describe("Sessions", () => {
     cy.get("button").click();
 
     // Verify dashboard
-    cy.url().should("include", "/hosts/manage");
-    cy.contains("All Hosts");
+    cy.url().should("include", "/dashboard");
+    cy.contains("Host");
 
     // Log out
-    cy.findByAltText(/user avatar/i).click();
+    cy.get(".avatar").first().click();
     cy.contains("button", "Sign out").click();
 
     cy.url().should("match", /\/login$/);

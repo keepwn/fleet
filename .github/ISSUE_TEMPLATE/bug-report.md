@@ -9,7 +9,7 @@ assignees: ''
 
 **Fleet version** (Head to the "My account" page in the Fleet UI or run `fleetctl version`):
 
-**Fleet tier** (Are you using the free (Fleet Core) or paid (Fleet Basic) tier?):
+**Fleet tier** (Are you using the free (Fleet Free) or paid (Fleet Premium) tier?):
 
 **User role** (Which role are you assigned in Fleet? (Admin, Maintainer, or Observer)):
 > 3 roles are introduced in Fleet 4.0.0. If you're using a prior version of Fleet or don't know your assigned role, please feel free to leave this item blank.
@@ -33,4 +33,4 @@ assignees: ''
 
 <!-- If this is an issue with the Fleet UI: Please also [answer this question](https://github.com/fleetdm/fleet/blob/main/CONTRIBUTING.md#6-is-this-an-issue-with-the-fleet-ui). -->
 
-<!-- If this is a performance issue: Please [follow these steps](https://github.com/fleetdm/fleet/blob/main/docs/1-Using-Fleet/6-Monitoring-Fleet.md#debugging-performance-issues) to generate and attach a debug archive. -->
+<!-- If this is a performance issue: Please [follow these steps](https://github.com/fleetdm/fleet/blob/main/docs/01-Using-Fleet/06-Monitoring-Fleet.md#debugging-performance-issues) to generate and attach a debug archive. -->

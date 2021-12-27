@@ -5,8 +5,7 @@ import { isEqual } from "lodash";
 import { push } from "react-router-redux";
 import memoize from "memoize-one";
 
-import TableContainer from "components/TableContainer";
-import Modal from "components/modals/Modal";
+import Fleet from "fleet";
 import inviteInterface from "interfaces/invite";
 import configInterface from "interfaces/config";
 import userInterface from "interfaces/user";
@@ -14,19 +13,24 @@ import teamInterface from "interfaces/team";
 import permissionUtils from "utilities/permissions";
 import paths from "router/paths";
 import entityGetter from "redux/utilities/entityGetter";
-import inviteActions from "redux/nodes/entities/invites/actions";
 import { renderFlash } from "redux/nodes/notifications/actions";
 import { updateUser } from "redux/nodes/auth/actions";
+import inviteActions from "redux/nodes/entities/invites/actions";
 import userActions from "redux/nodes/entities/users/actions";
 import teamActions from "redux/nodes/entities/teams/actions";
 
-import UserForm from "./components/UserForm";
+import TableContainer from "components/TableContainer";
+import TableDataError from "components/TableDataError";
+import Modal from "components/Modal";
+import { DEFAULT_CREATE_USER_ERRORS } from "utilities/constants";
 import EmptyUsers from "./components/EmptyUsers";
 import { generateTableHeaders, combineDataSets } from "./UsersTableConfig";
 import DeleteUserForm from "./components/DeleteUserForm";
 import ResetPasswordModal from "./components/ResetPasswordModal";
 import ResetSessionsModal from "./components/ResetSessionsModal";
 import { NewUserType } from "./components/UserForm/UserForm";
+import CreateUserModal from "../UserManagementPage/components/CreateUserModal";
+import EditUserModal from "../UserManagementPage/components/EditUserModal";
 
 const baseClass = "user-management";
 
@@ -62,7 +66,7 @@ export class UserManagementPage extends Component {
       base: PropTypes.string,
       email: PropTypes.string,
     }),
-    isBasicTier: PropTypes.bool,
+    isPremiumTier: PropTypes.bool,
     users: PropTypes.arrayOf(userInterface),
     userErrors: PropTypes.shape({
       base: PropTypes.string,
@@ -80,15 +84,27 @@ export class UserManagementPage extends Component {
       showDeleteUserModal: false,
       showResetPasswordModal: false,
       showResetSessionsModal: false,
+      isFormSubmitting: false,
       userEditing: null,
       usersEditing: [],
+      createUserErrors: { DEFAULT_CREATE_USER_ERRORS },
     };
   }
 
   componentDidMount() {
-    const { dispatch, isBasicTier } = this.props;
-    if (isBasicTier) {
+    const { dispatch, isPremiumTier } = this.props;
+    if (isPremiumTier) {
       dispatch(teamActions.loadAll({}));
+    }
+  }
+
+  // Note: If the page is refreshed, `isPremiumTier` will be false at `componentDidMount` because
+  // `config` will not have been loaded at that point. Accordingly, we need this lifecycle hook so
+  // that `teams` information will be available to the edit user form.
+  componentDidUpdate(prevProps) {
+    const { dispatch, isPremiumTier } = this.props;
+    if (prevProps.isPremiumTier !== isPremiumTier) {
+      isPremiumTier && dispatch(teamActions.loadAll({}));
     }
   }
 
@@ -100,6 +116,30 @@ export class UserManagementPage extends Component {
     const userData = getUser(userEditing.type, userEditing.id);
 
     const updatedAttrs = generateUpdateData(userData, formData);
+    if (userEditing.type === "invite") {
+      // Note: The edit invite action in this if block is occuring outside of Redux (unlike the
+      // other cases below this block). Therefore, we must dispatch the loadAll action to ensure the
+      // Redux store is updated.
+      return Fleet.invites
+        .update(userData, formData)
+        .then(() => {
+          dispatch(
+            renderFlash("success", `Successfully edited ${userEditing?.name}`)
+          );
+          toggleEditUserModal();
+        })
+        .then(() => dispatch(inviteActions.loadAll()))
+        .catch(() => {
+          dispatch(
+            renderFlash(
+              "error",
+              `Could not edit ${userEditing?.name}. Please try again.`
+            )
+          );
+          toggleEditUserModal();
+        });
+    }
+
     if (currentUser.id === userEditing.id) {
       return dispatch(updateUser(userData, updatedAttrs))
         .then(() => {
@@ -144,6 +184,8 @@ export class UserManagementPage extends Component {
   onCreateUserSubmit = (formData) => {
     const { dispatch, config } = this.props;
 
+    this.setState({ isFormSubmitting: true });
+
     if (formData.newUserType === NewUserType.AdminInvited) {
       // Do some data formatting adding `invited_by` for the request to be correct and deleteing uncessary fields
       const requestData = {
@@ -163,11 +205,22 @@ export class UserManagementPage extends Component {
           );
           this.toggleCreateUserModal();
         })
-        .catch(() => {
-          dispatch(
-            renderFlash("error", "Could not create user. Please try again.")
-          );
-          this.toggleCreateUserModal();
+        .catch((userErrors) => {
+          if (userErrors.base.includes("Duplicate")) {
+            dispatch(
+              renderFlash(
+                "error",
+                "A user with this email address already exists."
+              )
+            );
+          } else {
+            dispatch(
+              renderFlash("error", "Could not create user. Please try again.")
+            );
+          }
+        })
+        .finally(() => {
+          this.setState({ isFormSubmitting: false });
         });
     } else {
       // Do some data formatting deleteing uncessary fields
@@ -183,11 +236,22 @@ export class UserManagementPage extends Component {
           );
           this.toggleCreateUserModal();
         })
-        .catch(() => {
-          dispatch(
-            renderFlash("error", "Could not create user. Please try again.")
-          );
-          this.toggleCreateUserModal();
+        .catch((userErrors) => {
+          if (userErrors.base.includes("Duplicate")) {
+            dispatch(
+              renderFlash(
+                "error",
+                "A user with this email address already exists."
+              )
+            );
+          } else {
+            dispatch(
+              renderFlash("error", "Could not create user. Please try again.")
+            );
+          }
+        })
+        .finally(() => {
+          this.setState({ isFormSubmitting: false });
         });
     }
   };
@@ -238,15 +302,14 @@ export class UserManagementPage extends Component {
   };
 
   onResetSessions = () => {
-    const { LOGIN } = paths;
     const { currentUser, dispatch } = this.props;
     const { userEditing } = this.state;
     const { toggleResetSessionsUserModal } = this;
-    dispatch(userActions.deleteSessions(userEditing))
+    const isResettingCurrentUser = currentUser.id === userEditing.id;
+
+    dispatch(userActions.deleteSessions(userEditing, isResettingCurrentUser))
       .then(() => {
-        if (currentUser.id === userEditing.id) {
-          dispatch(push(LOGIN));
-        } else {
+        if (!isResettingCurrentUser) {
           dispatch(renderFlash("success", "Sessions reset"));
         }
       })
@@ -330,9 +393,18 @@ export class UserManagementPage extends Component {
 
   toggleCreateUserModal = () => {
     const { showCreateUserModal } = this.state;
-    this.setState({
-      showCreateUserModal: !showCreateUserModal,
-    });
+
+    this.setState(
+      {
+        showCreateUserModal: !showCreateUserModal,
+      },
+      () => {
+        // clear errors on close
+        if (!showCreateUserModal) {
+          this.setState({ createUserErrors: DEFAULT_CREATE_USER_ERRORS });
+        }
+      }
+    );
   };
 
   toggleEditUserModal = (user) => {
@@ -412,7 +484,7 @@ export class UserManagementPage extends Component {
       inviteErrors,
       config,
       teams,
-      isBasicTier,
+      isPremiumTier,
     } = this.props;
     const { showEditUserModal, userEditing } = this.state;
     const { onEditUser, toggleEditUserModal, getUser } = this;
@@ -427,22 +499,25 @@ export class UserManagementPage extends Component {
         onExit={toggleEditUserModal}
         className={`${baseClass}__edit-user-modal`}
       >
-        <UserForm
-          serverErrors={inviteErrors}
-          defaultEmail={userData.email}
-          defaultName={userData.name}
-          defaultGlobalRole={userData.global_role}
-          defaultTeams={userData.teams}
-          currentUserId={currentUser.id}
-          onCancel={toggleEditUserModal}
-          onSubmit={onEditUser}
-          availableTeams={teams}
-          submitText={"Save"}
-          isBasicTier={isBasicTier}
-          smtpConfigured={config.configured}
-          canUseSso={config.enable_sso}
-          isSsoEnabled={userData.sso_enabled}
-        />
+        <>
+          <EditUserModal
+            serverError={inviteErrors}
+            defaultEmail={userData.email}
+            defaultName={userData.name}
+            defaultGlobalRole={userData.global_role}
+            defaultTeams={userData.teams}
+            currentUserId={currentUser.id}
+            onCancel={toggleEditUserModal}
+            onSubmit={onEditUser}
+            availableTeams={teams}
+            submitText={"Save"}
+            isPremiumTier={isPremiumTier}
+            smtpConfigured={config.configured}
+            canUseSso={config.enable_sso}
+            isSsoEnabled={userData.sso_enabled}
+            isModifiedByGlobalAdmin
+          />
+        </>
       </Modal>
     );
   };
@@ -450,38 +525,34 @@ export class UserManagementPage extends Component {
   renderCreateUserModal = () => {
     const {
       currentUser,
-      inviteErrors,
       config,
       teams,
-      isBasicTier,
+      userErrors,
+      isPremiumTier,
     } = this.props;
-    const { showCreateUserModal } = this.state;
+    const { showCreateUserModal, isFormSubmitting } = this.state;
     const { onCreateUserSubmit, toggleCreateUserModal } = this;
 
     if (!showCreateUserModal) return null;
 
     return (
-      <Modal
-        title="Create user"
-        onExit={toggleCreateUserModal}
-        className={`${baseClass}__create-user-modal`}
-      >
-        <UserForm
-          serverErrors={inviteErrors}
-          currentUserId={currentUser.id}
-          onCancel={toggleCreateUserModal}
-          onSubmit={onCreateUserSubmit}
-          availableTeams={teams}
-          defaultGlobalRole={"observer"}
-          defaultTeams={[]}
-          defaultNewUserType={false}
-          submitText={"Create"}
-          isBasicTier={isBasicTier}
-          smtpConfigured={config.configured}
-          canUseSso={config.enable_sso}
-          isNewUser
-        />
-      </Modal>
+      <CreateUserModal
+        serverError={userErrors}
+        currentUserId={currentUser.id}
+        onCancel={toggleCreateUserModal}
+        onSubmit={onCreateUserSubmit}
+        availableTeams={teams}
+        defaultGlobalRole={"observer"}
+        defaultTeams={[]}
+        defaultNewUserType={false}
+        submitText={"Create"}
+        isPremiumTier={isPremiumTier}
+        smtpConfigured={config.configured}
+        canUseSso={config.enable_sso}
+        isFormSubmitting={isFormSubmitting}
+        isModifiedByGlobalAdmin
+        isNewUser
+      />
     );
   };
 
@@ -555,10 +626,11 @@ export class UserManagementPage extends Component {
       users,
       invites,
       currentUser,
-      isBasicTier,
+      isPremiumTier,
+      userErrors,
     } = this.props;
 
-    const tableHeaders = generateTableHeaders(onActionSelect, isBasicTier);
+    const tableHeaders = generateTableHeaders(onActionSelect, isPremiumTier);
 
     let tableData = [];
     if (!loadingTableData) {
@@ -577,20 +649,25 @@ export class UserManagementPage extends Component {
           Fleet.
         </p>
         {/* TODO: find a way to move these controls into the table component */}
-        <TableContainer
-          columns={tableHeaders}
-          data={tableData}
-          isLoading={loadingTableData}
-          defaultSortHeader={"name"}
-          defaultSortDirection={"asc"}
-          inputPlaceHolder={"Search"}
-          actionButtonText={"Create user"}
-          onActionButtonClick={toggleCreateUserModal}
-          onQueryChange={onTableQueryChange}
-          resultsTitle={"users"}
-          emptyComponent={EmptyUsers}
-          searchable
-        />
+        {users.length === 0 && Object.keys(userErrors).length > 0 ? (
+          <TableDataError />
+        ) : (
+          <TableContainer
+            columns={tableHeaders}
+            data={tableData}
+            isLoading={loadingTableData}
+            defaultSortHeader={"name"}
+            defaultSortDirection={"asc"}
+            inputPlaceHolder={"Search"}
+            actionButtonText={"Create user"}
+            onActionButtonClick={toggleCreateUserModal}
+            onQueryChange={onTableQueryChange}
+            resultsTitle={"users"}
+            emptyComponent={EmptyUsers}
+            searchable
+            isClientSideSearch
+          />
+        )}
         {renderCreateUserModal()}
         {renderEditUserModal()}
         {renderDeleteUserModal()}
@@ -615,7 +692,7 @@ const mapStateToProps = (state) => {
   } = state.entities.invites;
   const { errors: userErrors, loading: loadingUsers } = state.entities.users;
   const loadingTableData = loadingUsers || loadingInvites;
-  const isBasicTier = permissionUtils.isBasicTier(config);
+  const isPremiumTier = permissionUtils.isPremiumTier(config);
 
   return {
     appConfigLoading,
@@ -625,7 +702,7 @@ const mapStateToProps = (state) => {
     userErrors,
     invites,
     inviteErrors,
-    isBasicTier,
+    isPremiumTier,
     loadingTableData,
     teams,
   };

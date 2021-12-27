@@ -3,12 +3,10 @@ package service
 import (
 	"context"
 	"database/sql"
-	"net/http"
 
+	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/ptr"
-	kithttp "github.com/go-kit/kit/transport/http"
-	"github.com/pkg/errors"
 )
 
 type applyTeamSpecsRequest struct {
@@ -20,14 +18,6 @@ type applyTeamSpecsResponse struct {
 }
 
 func (r applyTeamSpecsResponse) error() error { return r.Err }
-
-func makeApplyTeamSpecsEndpoint(svc fleet.Service, opts []kithttp.ServerOption) http.Handler {
-	return newServer(
-		makeAuthenticatedServiceEndpoint(svc, applyTeamSpecsEndpoint),
-		makeDecoder(applyTeamSpecsRequest{}),
-		opts,
-	)
-}
 
 func applyTeamSpecsEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (interface{}, error) {
 	req := request.(*applyTeamSpecsRequest)
@@ -56,14 +46,14 @@ func (svc Service) ApplyTeamSpecs(ctx context.Context, specs []*fleet.TeamSpec) 
 			})
 		}
 
-		team, err := svc.ds.TeamByName(spec.Name)
+		team, err := svc.ds.TeamByName(ctx, spec.Name)
 		if err != nil {
-			if err := errors.Cause(err); err == sql.ErrNoRows {
+			if err := ctxerr.Cause(err); err == sql.ErrNoRows {
 				agentOptions := spec.AgentOptions
 				if agentOptions == nil {
 					agentOptions = config.AgentOptions
 				}
-				_, err = svc.ds.NewTeam(&fleet.Team{
+				_, err = svc.ds.NewTeam(ctx, &fleet.Team{
 					Name:         spec.Name,
 					AgentOptions: agentOptions,
 					Secrets:      secrets,
@@ -80,16 +70,31 @@ func (svc Service) ApplyTeamSpecs(ctx context.Context, specs []*fleet.TeamSpec) 
 		team.AgentOptions = spec.AgentOptions
 		team.Secrets = secrets
 
-		_, err = svc.ds.SaveTeam(team)
+		_, err = svc.ds.SaveTeam(ctx, team)
 		if err != nil {
 			return err
 		}
 
-		err = svc.ds.ApplyEnrollSecrets(ptr.Uint(team.ID), secrets)
+		err = svc.ds.ApplyEnrollSecrets(ctx, ptr.Uint(team.ID), secrets)
 		if err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+type modifyTeamEnrollSecretsRequest struct {
+	TeamID  uint                 `url:"team_id"`
+	Secrets []fleet.EnrollSecret `json:"secrets"`
+}
+
+func modifyTeamEnrollSecretsEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (interface{}, error) {
+	req := request.(*modifyTeamEnrollSecretsRequest)
+	secrets, err := svc.ModifyTeamEnrollSecrets(ctx, req.TeamID, req.Secrets)
+	if err != nil {
+		return teamEnrollSecretsResponse{Err: err}, nil
+	}
+
+	return teamEnrollSecretsResponse{Secrets: secrets}, err
 }

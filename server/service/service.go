@@ -3,8 +3,8 @@
 package service
 
 import (
+	"fmt"
 	"html/template"
-	"strings"
 	"sync"
 
 	"github.com/WatchBeam/clock"
@@ -12,15 +12,15 @@ import (
 	"github.com/fleetdm/fleet/v4/server/config"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/logging"
+	"github.com/fleetdm/fleet/v4/server/service/async"
 	"github.com/fleetdm/fleet/v4/server/sso"
 	kitlog "github.com/go-kit/kit/log"
-	"github.com/kolide/kit/version"
-	"github.com/pkg/errors"
 )
 
 // Service is the struct implementing fleet.Service. Create a new one with NewService.
 type Service struct {
 	ds             fleet.Datastore
+	task           *async.Task
 	carveStore     fleet.CarveStore
 	resultStore    fleet.QueryResultStore
 	liveQueryStore fleet.LiveQueryStore
@@ -40,19 +40,30 @@ type Service struct {
 }
 
 // NewService creates a new service from the config struct
-func NewService(ds fleet.Datastore, resultStore fleet.QueryResultStore,
-	logger kitlog.Logger, osqueryLogger *logging.OsqueryLogger, config config.FleetConfig, mailService fleet.MailService,
-	c clock.Clock, sso sso.SessionStore, lq fleet.LiveQueryStore, carveStore fleet.CarveStore,
-	license fleet.LicenseInfo) (fleet.Service, error) {
+func NewService(
+	ds fleet.Datastore,
+	task *async.Task,
+	resultStore fleet.QueryResultStore,
+	logger kitlog.Logger,
+	osqueryLogger *logging.OsqueryLogger,
+	config config.FleetConfig,
+	mailService fleet.MailService,
+	c clock.Clock,
+	sso sso.SessionStore,
+	lq fleet.LiveQueryStore,
+	carveStore fleet.CarveStore,
+	license fleet.LicenseInfo,
+) (fleet.Service, error) {
 	var svc fleet.Service
 
 	authorizer, err := authz.NewAuthorizer()
 	if err != nil {
-		return nil, errors.Wrap(err, "new authorizer")
+		return nil, fmt.Errorf("new authorizer: %w", err)
 	}
 
 	svc = &Service{
 		ds:               ds,
+		task:             task,
 		carveStore:       carveStore,
 		resultStore:      resultStore,
 		liveQueryStore:   lq,
@@ -80,17 +91,9 @@ type validationMiddleware struct {
 	ssoSessionStore sso.SessionStore
 }
 
-// getAssetURL gets the URL prefix used for retrieving assets from Github. This
-// function will determine the appropriate version to use, and create a URL
-// prefix for retrieving assets from that tag.
+// getAssetURL simply returns the base url used for retrieving image assets from fleetdm.com.
 func getAssetURL() template.URL {
-	v := version.Version().Version
-	tag := strings.Split(v, "-")[0]
-	if tag == "unknown" {
-		tag = "main"
-	}
-
-	return template.URL("https://github.com/fleetdm/fleet/blob/" + tag)
+	return template.URL("https://fleetdm.com/images/permanent")
 }
 
 // seenHostSet implements synchronized storage for the set of seen hosts.

@@ -3,18 +3,38 @@ import classnames from "classnames";
 
 const baseClass = "button";
 
-interface IButtonProps {
+export type ButtonVariant =
+  | "brand"
+  | "success"
+  | "alert"
+  | "blue-green"
+  | "grey"
+  | "warning"
+  | "link"
+  | "label"
+  | "text-link"
+  | "text-icon"
+  | "inverse"
+  | "inverse-alert"
+  | "block"
+  | "unstyled"
+  | "unstyled-modal-query"
+  | "contextual-nav-item"
+  | "small-text-icon";
+
+export interface IButtonProps {
   autofocus?: boolean;
-  block?: boolean;
   children: React.ReactChild;
   className?: string;
   disabled?: boolean;
-  onClick?: (evt: React.MouseEvent<HTMLButtonElement>) => void;
   size?: string;
   tabIndex?: number;
   type?: "button" | "submit" | "reset";
   title?: string;
-  variant?: string; // default, brand, inverse, alert, disabled...
+  variant?: ButtonVariant;
+  onClick?:
+    | ((value?: any) => void)
+    | ((evt: React.MouseEvent<HTMLButtonElement>) => void);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-interface
@@ -26,7 +46,6 @@ interface Inputs {
 
 class Button extends React.Component<IButtonProps, IButtonState> {
   static defaultProps = {
-    block: false,
     size: "",
     type: "button",
     variant: "default",
@@ -68,7 +87,6 @@ class Button extends React.Component<IButtonProps, IButtonState> {
   render(): JSX.Element {
     const { handleClick, setRef } = this;
     const {
-      block,
       children,
       className,
       disabled,
@@ -83,7 +101,6 @@ class Button extends React.Component<IButtonProps, IButtonState> {
       `${baseClass}--${variant}`,
       className,
       {
-        [`${baseClass}--block`]: block,
         [`${baseClass}--disabled`]: disabled,
         [`${baseClass}--${size}`]: size !== undefined,
       }

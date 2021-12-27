@@ -26,7 +26,7 @@ func hostResponseForHost(ctx context.Context, svc fleet.Service, host *fleet.Hos
 	}, nil
 }
 
-// HostDetailresponse is the response struct that contains the full host information
+// HostDetailResponse is the response struct that contains the full host information
 // with the HostDetail details.
 type HostDetailResponse struct {
 	fleet.HostDetail
@@ -47,7 +47,7 @@ func hostDetailResponseForHost(ctx context.Context, svc fleet.Service, host *fle
 ////////////////////////////////////////////////////////////////////////////////
 
 type getHostRequest struct {
-	ID uint `json:"id"`
+	ID uint `url:"id"`
 }
 
 type getHostResponse struct {
@@ -56,25 +56,6 @@ type getHostResponse struct {
 }
 
 func (r getHostResponse) error() error { return r.Err }
-
-func makeGetHostEndpoint(svc fleet.Service) endpoint.Endpoint {
-	return func(ctx context.Context, request interface{}) (interface{}, error) {
-		req := request.(getHostRequest)
-		host, err := svc.GetHost(ctx, req.ID)
-		if err != nil {
-			return getHostResponse{Err: err}, nil
-		}
-
-		resp, err := hostDetailResponseForHost(ctx, svc, host)
-		if err != nil {
-			return getHostResponse{Err: err}, nil
-		}
-
-		return getHostResponse{
-			Host: resp,
-		}, nil
-	}
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Get Host By Identifier
@@ -100,67 +81,6 @@ func makeHostByIdentifierEndpoint(svc fleet.Service) endpoint.Endpoint {
 		return getHostResponse{
 			Host: resp,
 		}, nil
-	}
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// List Hosts
-////////////////////////////////////////////////////////////////////////////////
-
-type listHostsRequest struct {
-	ListOptions fleet.HostListOptions
-}
-
-type listHostsResponse struct {
-	Hosts []HostResponse `json:"hosts"`
-	Err   error          `json:"error,omitempty"`
-}
-
-func (r listHostsResponse) error() error { return r.Err }
-
-func makeListHostsEndpoint(svc fleet.Service) endpoint.Endpoint {
-	return func(ctx context.Context, request interface{}) (interface{}, error) {
-		req := request.(listHostsRequest)
-		hosts, err := svc.ListHosts(ctx, req.ListOptions)
-		if err != nil {
-			return listHostsResponse{Err: err}, nil
-		}
-
-		hostResponses := make([]HostResponse, len(hosts))
-		for i, host := range hosts {
-			h, err := hostResponseForHost(ctx, svc, host)
-			if err != nil {
-				return listHostsResponse{Err: err}, nil
-			}
-
-			hostResponses[i] = *h
-		}
-		return listHostsResponse{Hosts: hostResponses}, nil
-	}
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Get Host Summary
-////////////////////////////////////////////////////////////////////////////////
-
-type getHostSummaryResponse struct {
-	fleet.HostSummary
-	Err error `json:"error,omitempty"`
-}
-
-func (r getHostSummaryResponse) error() error { return r.Err }
-
-func makeGetHostSummaryEndpoint(svc fleet.Service) endpoint.Endpoint {
-	return func(ctx context.Context, request interface{}) (interface{}, error) {
-		summary, err := svc.GetHostSummary(ctx)
-		if err != nil {
-			return getHostSummaryResponse{Err: err}, nil
-		}
-
-		resp := getHostSummaryResponse{
-			HostSummary: *summary,
-		}
-		return resp, nil
 	}
 }
 

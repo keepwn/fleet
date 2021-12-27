@@ -2,13 +2,13 @@ package service
 
 import (
 	"context"
-	"github.com/fleetdm/fleet/v4/server/config"
 	"runtime"
 	"testing"
 
+	"github.com/fleetdm/fleet/v4/server/config"
+
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/mock"
-	"github.com/fleetdm/fleet/v4/server/ptr"
 	"github.com/fleetdm/fleet/v4/server/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,22 +38,22 @@ func TestCreateAppConfig(t *testing.T) {
 	ds := new(mock.Store)
 	svc := newTestService(ds, nil, nil)
 
-	ds.AppConfigFunc = func() (*fleet.AppConfig, error) {
+	ds.AppConfigFunc = func(ctx context.Context) (*fleet.AppConfig, error) {
 		return &fleet.AppConfig{}, nil
 	}
 
 	var appConfigTests = []struct {
-		configPayload fleet.AppConfigPayload
+		configPayload fleet.AppConfig
 	}{
 		{
-			configPayload: fleet.AppConfigPayload{
-				OrgInfo: &fleet.OrgInfo{
-					OrgLogoURL: ptr.String("acme.co/images/logo.png"),
-					OrgName:    ptr.String("Acme"),
+			configPayload: fleet.AppConfig{
+				OrgInfo: fleet.OrgInfo{
+					OrgLogoURL: "acme.co/images/logo.png",
+					OrgName:    "Acme",
 				},
-				ServerSettings: &fleet.ServerSettings{
-					ServerURL:         ptr.String("https://acme.co:8080/"),
-					LiveQueryDisabled: ptr.Bool(true),
+				ServerSettings: fleet.ServerSettings{
+					ServerURL:         "https://acme.co:8080/",
+					LiveQueryDisabled: true,
 				},
 			},
 		},
@@ -61,13 +61,13 @@ func TestCreateAppConfig(t *testing.T) {
 
 	for _, tt := range appConfigTests {
 		var result *fleet.AppConfig
-		ds.NewAppConfigFunc = func(config *fleet.AppConfig) (*fleet.AppConfig, error) {
+		ds.NewAppConfigFunc = func(ctx context.Context, config *fleet.AppConfig) (*fleet.AppConfig, error) {
 			result = config
 			return config, nil
 		}
 
 		var gotSecrets []*fleet.EnrollSecret
-		ds.ApplyEnrollSecretsFunc = func(teamID *uint, secrets []*fleet.EnrollSecret) error {
+		ds.ApplyEnrollSecretsFunc = func(ctx context.Context, teamID *uint, secrets []*fleet.EnrollSecret) error {
 			gotSecrets = secrets
 			return nil
 		}
@@ -77,10 +77,10 @@ func TestCreateAppConfig(t *testing.T) {
 		require.Nil(t, err)
 
 		payload := tt.configPayload
-		assert.Equal(t, *payload.OrgInfo.OrgLogoURL, result.OrgLogoURL)
-		assert.Equal(t, *payload.OrgInfo.OrgName, result.OrgName)
-		assert.Equal(t, "https://acme.co:8080", result.ServerURL)
-		assert.Equal(t, *payload.ServerSettings.LiveQueryDisabled, result.LiveQueryDisabled)
+		assert.Equal(t, payload.OrgInfo.OrgLogoURL, result.OrgInfo.OrgLogoURL)
+		assert.Equal(t, payload.OrgInfo.OrgName, result.OrgInfo.OrgName)
+		assert.Equal(t, "https://acme.co:8080/", result.ServerSettings.ServerURL)
+		assert.Equal(t, payload.ServerSettings.LiveQueryDisabled, result.ServerSettings.LiveQueryDisabled)
 
 		// Ensure enroll secret was set
 		require.NotNil(t, gotSecrets)
@@ -93,10 +93,10 @@ func TestEmptyEnrollSecret(t *testing.T) {
 	ds := new(mock.Store)
 	svc := newTestService(ds, nil, nil)
 
-	ds.ApplyEnrollSecretsFunc = func(teamID *uint, secrets []*fleet.EnrollSecret) error {
+	ds.ApplyEnrollSecretsFunc = func(ctx context.Context, teamID *uint, secrets []*fleet.EnrollSecret) error {
 		return nil
 	}
-	ds.AppConfigFunc = func() (*fleet.AppConfig, error) {
+	ds.AppConfigFunc = func(ctx context.Context) (*fleet.AppConfig, error) {
 		return &fleet.AppConfig{}, nil
 	}
 
@@ -279,13 +279,13 @@ func TestService_LoggingConfig(t *testing.T) {
 			},
 		},
 		{
-			name:   "test unrecognized config",
+			name: "test unrecognized config",
 			fields: fields{config: config.FleetConfig{
 				Osquery: config.OsqueryConfig{ResultLogPlugin: "bar", StatusLogPlugin: "bar"},
 			}},
-			args:   args{ctx: test.UserContext(test.UserAdmin)},
+			args:    args{ctx: test.UserContext(test.UserAdmin)},
 			wantErr: true,
-			want: nil,
+			want:    nil,
 		},
 	}
 	t.Parallel()
@@ -303,4 +303,36 @@ func TestService_LoggingConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestModifyAppConfigPatches(t *testing.T) {
+	ds := new(mock.Store)
+	svc := newTestService(ds, nil, nil)
+
+	storedConfig := &fleet.AppConfig{}
+
+	ds.AppConfigFunc = func(ctx context.Context) (*fleet.AppConfig, error) {
+		return storedConfig, nil
+	}
+
+	ds.SaveAppConfigFunc = func(ctx context.Context, info *fleet.AppConfig) error {
+		storedConfig = info
+		return nil
+	}
+
+	configJSON := []byte(`{"org_info": { "org_name": "Acme", "org_logo_url": "somelogo.jpg" }}`)
+
+	ctx := test.UserContext(test.UserAdmin)
+	_, err := svc.ModifyAppConfig(ctx, configJSON)
+	require.NoError(t, err)
+
+	assert.Equal(t, "Acme", storedConfig.OrgInfo.OrgName)
+
+	configJSON = []byte(`{"server_settings": { "server_url": "http://someurl" }}`)
+
+	_, err = svc.ModifyAppConfig(ctx, configJSON)
+	require.NoError(t, err)
+
+	assert.Equal(t, "Acme", storedConfig.OrgInfo.OrgName)
+	assert.Equal(t, "http://someurl", storedConfig.ServerSettings.ServerURL)
 }

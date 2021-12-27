@@ -1,5 +1,9 @@
 import PropTypes, { number } from "prop-types";
 
+import scheduledQueryStatsInterface, {
+  IScheduledQueryStats,
+} from "./scheduled_query_stats";
+
 export default PropTypes.shape({
   scheduled_query_name: PropTypes.string,
   scheduled_query_id: PropTypes.number,
@@ -16,6 +20,7 @@ export default PropTypes.shape({
   system_time: PropTypes.number,
   user_time: PropTypes.number,
   wall_time: PropTypes.number,
+  stats: scheduledQueryStatsInterface,
 });
 
 export interface IQueryStats {
@@ -25,13 +30,14 @@ export interface IQueryStats {
   description: string;
   pack_name: string;
   pack_id: number;
-  average_memory?: number;
-  denylisted?: boolean;
-  executions?: number;
+  average_memory: number;
+  denylisted: boolean;
+  executions: number;
   interval: number;
   last_executed: string;
   output_size?: number;
-  system_time?: number;
-  user_time?: number;
+  system_time: number;
+  user_time: number;
   wall_time?: number;
+  stats?: IScheduledQueryStats;
 }

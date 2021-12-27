@@ -1,8 +1,8 @@
 package fleet
 
 import (
-	"context"
-	"time"
+	"encoding/json"
+	"fmt"
 )
 
 type TargetSearchResults struct {
@@ -32,31 +32,6 @@ type TargetMetrics struct {
 	NewHosts uint `db:"new"`
 }
 
-type TargetService interface {
-	// SearchTargets will accept a search query, a slice of IDs of hosts to
-	// omit, and a slice of IDs of labels to omit, and it will return a set of
-	// targets (hosts and label) which match the supplied search query. If the
-	// query ID is provided and the referenced query allows observers to run,
-	// targets will include hosts that the user has observer role for.
-	SearchTargets(ctx context.Context, searchQuery string, queryID *uint, targets HostTargets) (*TargetSearchResults, error)
-
-	// CountHostsInTargets returns the metrics of the hosts in the provided
-	// label and explicit host IDs. If the query ID is provided and the
-	// referenced query allows observers to run, targets will include hosts that
-	// the user has observer role for.
-	CountHostsInTargets(ctx context.Context, queryID *uint, targets HostTargets) (*TargetMetrics, error)
-}
-
-type TargetStore interface {
-	// CountHostsInTargets returns the metrics of the hosts in the provided
-	// labels, teams, and explicit host IDs.
-	CountHostsInTargets(filter TeamFilter, targets HostTargets, now time.Time) (TargetMetrics, error)
-	// HostIDsInTargets returns the host IDs of the hosts in the provided
-	// labels, teams, and explicit host IDs. The returned host IDs should be
-	// sorted in ascending order.
-	HostIDsInTargets(filter TeamFilter, targets HostTargets) ([]uint, error)
-}
-
 // HostTargets is the set of targets for a campaign (live query). These
 // targets are additive (include all hosts and all hosts in labels and all hosts
 // in teams).
@@ -77,9 +52,53 @@ const (
 	TargetTeam
 )
 
+func (t TargetType) String() string {
+	switch t {
+	case TargetLabel:
+		return "label"
+	case TargetHost:
+		return "host"
+	case TargetTeam:
+		return "team"
+	default:
+		return fmt.Sprintf("unknown: %d", t)
+	}
+}
+
+func ParseTargetType(s string) (TargetType, error) {
+	switch s {
+	case "label":
+		return TargetLabel, nil
+	case "host":
+		return TargetHost, nil
+	case "team":
+		return TargetTeam, nil
+	default:
+		return 0, fmt.Errorf("invalid TargetType: %s", s)
+	}
+}
+
+func (t TargetType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.String())
+}
+
+func (t *TargetType) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	parsed, err := ParseTargetType(s)
+	if err != nil {
+		return err
+	}
+	*t = parsed
+	return nil
+}
+
 type Target struct {
-	Type     TargetType `db:"type"`
-	TargetID uint       `db:"target_id"`
+	Type        TargetType `db:"type" json:"type"`
+	TargetID    uint       `db:"target_id" json:"id"`
+	DisplayText string     `db:"display_text" json:"display_text"`
 }
 
 func (t Target) AuthzType() string {

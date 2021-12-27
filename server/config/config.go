@@ -1,7 +1,11 @@
 package config
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,7 +33,7 @@ type MysqlConfig struct {
 	TLSKey          string `yaml:"tls_key"`
 	TLSCA           string `yaml:"tls_ca"`
 	TLSServerName   string `yaml:"tls_server_name"`
-	TLSConfig       string `yaml:"tls_config"` //tls=customValue in DSN
+	TLSConfig       string `yaml:"tls_config"` // tls=customValue in DSN
 	MaxOpenConns    int    `yaml:"max_open_conns"`
 	MaxIdleConns    int    `yaml:"max_idle_conns"`
 	ConnMaxLifetime int    `yaml:"conn_max_lifetime"`
@@ -37,11 +41,28 @@ type MysqlConfig struct {
 
 // RedisConfig defines configs related to Redis
 type RedisConfig struct {
-	Address          string
-	Password         string
-	Database         int
-	UseTLS           bool `yaml:"use_tls"`
-	DuplicateResults bool `yaml:"duplicate_results"`
+	Address                   string
+	Password                  string
+	Database                  int
+	UseTLS                    bool          `yaml:"use_tls"`
+	DuplicateResults          bool          `yaml:"duplicate_results"`
+	ConnectTimeout            time.Duration `yaml:"connect_timeout"`
+	KeepAlive                 time.Duration `yaml:"keep_alive"`
+	ConnectRetryAttempts      int           `yaml:"connect_retry_attempts"`
+	ClusterFollowRedirections bool          `yaml:"cluster_follow_redirections"`
+	ClusterReadFromReplica    bool          `yaml:"cluster_read_from_replica"`
+	TLSCert                   string        `yaml:"tls_cert"`
+	TLSKey                    string        `yaml:"tls_key"`
+	TLSCA                     string        `yaml:"tls_ca"`
+	TLSServerName             string        `yaml:"tls_server_name"`
+	TLSHandshakeTimeout       time.Duration `yaml:"tls_handshake_timeout"`
+	// TODO(mna): should we allow insecure skip verify option?
+	MaxIdleConns int `yaml:"max_idle_conns"`
+	MaxOpenConns int `yaml:"max_open_conns"`
+	// this config is an int on MysqlConfig, but it should be a time.Duration.
+	ConnMaxLifetime time.Duration `yaml:"conn_max_lifetime"`
+	IdleTimeout     time.Duration `yaml:"idle_timeout"`
+	ConnWaitTimeout time.Duration `yaml:"conn_wait_timeout"`
 }
 
 const (
@@ -81,23 +102,36 @@ type SessionConfig struct {
 
 // OsqueryConfig defines configs related to osquery
 type OsqueryConfig struct {
-	NodeKeySize          int           `yaml:"node_key_size"`
-	HostIdentifier       string        `yaml:"host_identifier"`
-	EnrollCooldown       time.Duration `yaml:"enroll_cooldown"`
-	StatusLogPlugin      string        `yaml:"status_log_plugin"`
-	ResultLogPlugin      string        `yaml:"result_log_plugin"`
-	LabelUpdateInterval  time.Duration `yaml:"label_update_interval"`
-	DetailUpdateInterval time.Duration `yaml:"detail_update_interval"`
-	StatusLogFile        string        `yaml:"status_log_file"`
-	ResultLogFile        string        `yaml:"result_log_file"`
-	EnableLogRotation    bool          `yaml:"enable_log_rotation"`
+	NodeKeySize                      int           `yaml:"node_key_size"`
+	HostIdentifier                   string        `yaml:"host_identifier"`
+	EnrollCooldown                   time.Duration `yaml:"enroll_cooldown"`
+	StatusLogPlugin                  string        `yaml:"status_log_plugin"`
+	ResultLogPlugin                  string        `yaml:"result_log_plugin"`
+	LabelUpdateInterval              time.Duration `yaml:"label_update_interval"`
+	PolicyUpdateInterval             time.Duration `yaml:"policy_update_interval"`
+	DetailUpdateInterval             time.Duration `yaml:"detail_update_interval"`
+	StatusLogFile                    string        `yaml:"status_log_file"`
+	ResultLogFile                    string        `yaml:"result_log_file"`
+	EnableLogRotation                bool          `yaml:"enable_log_rotation"`
+	MaxJitterPercent                 int           `yaml:"max_jitter_percent"`
+	EnableAsyncHostProcessing        bool          `yaml:"enable_async_host_processing"`
+	AsyncHostCollectInterval         time.Duration `yaml:"async_host_collect_interval"`
+	AsyncHostCollectMaxJitterPercent int           `yaml:"async_host_collect_max_jitter_percent"`
+	AsyncHostCollectLockTimeout      time.Duration `yaml:"async_host_collect_lock_timeout"`
+	AsyncHostCollectLogStatsInterval time.Duration `yaml:"async_host_collect_log_stats_interval"`
+	AsyncHostInsertBatch             int           `yaml:"async_host_insert_batch"`
+	AsyncHostDeleteBatch             int           `yaml:"async_host_delete_batch"`
+	AsyncHostUpdateBatch             int           `yaml:"async_host_update_batch"`
+	AsyncHostRedisPopCount           int           `yaml:"async_host_redis_pop_count"`
+	AsyncHostRedisScanKeysCount      int           `yaml:"async_host_redis_scan_keys_count"`
 }
 
 // LoggingConfig defines configs related to logging
 type LoggingConfig struct {
-	Debug         bool
-	JSON          bool
-	DisableBanner bool `yaml:"disable_banner"`
+	Debug                bool
+	JSON                 bool
+	DisableBanner        bool          `yaml:"disable_banner"`
+	ErrorRetentionPeriod time.Duration `yaml:"error_retention_period"`
 }
 
 // FirehoseConfig defines configs for the AWS Firehose logging plugin
@@ -134,11 +168,15 @@ type LambdaConfig struct {
 
 // S3Config defines config to enable file carving storage to an S3 bucket
 type S3Config struct {
-	Bucket           string
-	Prefix           string
+	Bucket           string `yaml:"bucket"`
+	Prefix           string `yaml:"prefix"`
+	Region           string `yaml:"region"`
+	EndpointURL      string `yaml:"endpoint_url"`
 	AccessKeyID      string `yaml:"access_key_id"`
 	SecretAccessKey  string `yaml:"secret_access_key"`
 	StsAssumeRoleArn string `yaml:"sts_assume_role_arn"`
+	DisableSSL       bool   `yaml:"disable_ssl"`
+	ForceS3PathStyle bool   `yaml:"force_s3_path_style"`
 }
 
 // PubSubConfig defines configs the for Google PubSub logging plugin
@@ -157,6 +195,14 @@ type FilesystemConfig struct {
 	EnableLogCompression bool   `json:"enable_log_compression" yaml:"enable_log_compression"`
 }
 
+// KafkaRESTConfig defines configs for the Kafka REST Proxy logging plugin.
+type KafkaRESTConfig struct {
+	StatusTopic string `json:"status_topic" yaml:"status_topic"`
+	ResultTopic string `json:"result_topic" yaml:"result_topic"`
+	ProxyHost   string `json:"proxyhost" yaml:"proxyhost"`
+	Timeout     int    `json:"timeout" yaml:"timeout"`
+}
+
 // LicenseConfig defines configs related to licensing Fleet.
 type LicenseConfig struct {
 	Key string `yaml:"key"`
@@ -169,6 +215,12 @@ type VulnerabilitiesConfig struct {
 	CPEDatabaseURL        string        `json:"cpe_database_url" yaml:"cpe_database_url"`
 	CVEFeedPrefixURL      string        `json:"cve_feed_prefix_url" yaml:"cve_feed_prefix_url"`
 	CurrentInstanceChecks string        `json:"current_instance_checks" yaml:"current_instance_checks"`
+	DisableDataSync       bool          `json:"disable_data_sync" yaml:"disable_data_sync"`
+}
+
+// UpgradesConfig defines configs related to fleet server upgrades.
+type UpgradesConfig struct {
+	AllowMissingMigrations bool `json:"allow_missing_migrations" yaml:"allow_missing_migrations"`
 }
 
 // FleetConfig stores the application configuration. Each subcategory is
@@ -176,53 +228,99 @@ type VulnerabilitiesConfig struct {
 // structs, Manager.addConfigs and Manager.LoadConfig should be
 // updated to set and retrieve the configurations as appropriate.
 type FleetConfig struct {
-	Mysql           MysqlConfig
-	Redis           RedisConfig
-	Server          ServerConfig
-	Auth            AuthConfig
-	App             AppConfig
-	Session         SessionConfig
-	Osquery         OsqueryConfig
-	Logging         LoggingConfig
-	Firehose        FirehoseConfig
-	Kinesis         KinesisConfig
-	Lambda          LambdaConfig
-	S3              S3Config
-	PubSub          PubSubConfig
-	Filesystem      FilesystemConfig
-	License         LicenseConfig
-	Vulnerabilities VulnerabilitiesConfig
+	Mysql            MysqlConfig
+	MysqlReadReplica MysqlConfig `yaml:"mysql_read_replica"`
+	Redis            RedisConfig
+	Server           ServerConfig
+	Auth             AuthConfig
+	App              AppConfig
+	Session          SessionConfig
+	Osquery          OsqueryConfig
+	Logging          LoggingConfig
+	Firehose         FirehoseConfig
+	Kinesis          KinesisConfig
+	Lambda           LambdaConfig
+	S3               S3Config
+	PubSub           PubSubConfig
+	Filesystem       FilesystemConfig
+	KafkaREST        KafkaRESTConfig
+	License          LicenseConfig
+	Vulnerabilities  VulnerabilitiesConfig
+	Upgrades         UpgradesConfig
+}
+
+type TLS struct {
+	TLSCert       string
+	TLSKey        string
+	TLSCA         string
+	TLSServerName string
+}
+
+func (t *TLS) ToTLSConfig() (*tls.Config, error) {
+	var rootCertPool *x509.CertPool
+	if t.TLSCA != "" {
+		rootCertPool = x509.NewCertPool()
+		pem, err := ioutil.ReadFile(t.TLSCA)
+		if err != nil {
+			return nil, fmt.Errorf("read server-ca pem: %w", err)
+		}
+		if ok := rootCertPool.AppendCertsFromPEM(pem); !ok {
+			return nil, errors.New("failed to append PEM.")
+		}
+	}
+
+	cfg := &tls.Config{
+		RootCAs: rootCertPool,
+	}
+	if t.TLSCert != "" {
+		clientCert := make([]tls.Certificate, 0, 1)
+		certs, err := tls.LoadX509KeyPair(t.TLSCert, t.TLSKey)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert and key: %w", err)
+		}
+		clientCert = append(clientCert, certs)
+		cfg.Certificates = clientCert
+	}
+
+	if t.TLSServerName != "" {
+		cfg.ServerName = t.TLSServerName
+	}
+	return cfg, nil
 }
 
 // addConfigs adds the configuration keys and default values that will be
 // filled into the FleetConfig struct
 func (man Manager) addConfigs() {
+	addMysqlConfig := func(prefix, defaultAddr, usageSuffix string) {
+		man.addConfigString(prefix+".protocol", "tcp",
+			"MySQL server communication protocol (tcp,unix,...)"+usageSuffix)
+		man.addConfigString(prefix+".address", defaultAddr,
+			"MySQL server address (host:port)"+usageSuffix)
+		man.addConfigString(prefix+".username", "fleet",
+			"MySQL server username"+usageSuffix)
+		man.addConfigString(prefix+".password", "",
+			"MySQL server password (prefer env variable for security)"+usageSuffix)
+		man.addConfigString(prefix+".password_path", "",
+			"Path to file containg MySQL server password"+usageSuffix)
+		man.addConfigString(prefix+".database", "fleet",
+			"MySQL database name"+usageSuffix)
+		man.addConfigString(prefix+".tls_cert", "",
+			"MySQL TLS client certificate path"+usageSuffix)
+		man.addConfigString(prefix+".tls_key", "",
+			"MySQL TLS client key path"+usageSuffix)
+		man.addConfigString(prefix+".tls_ca", "",
+			"MySQL TLS server CA"+usageSuffix)
+		man.addConfigString(prefix+".tls_server_name", "",
+			"MySQL TLS server name"+usageSuffix)
+		man.addConfigString(prefix+".tls_config", "",
+			"MySQL TLS config value"+usageSuffix+" Use skip-verify, true, false or custom key.")
+		man.addConfigInt(prefix+".max_open_conns", 50, "MySQL maximum open connection handles"+usageSuffix)
+		man.addConfigInt(prefix+".max_idle_conns", 50, "MySQL maximum idle connection handles"+usageSuffix)
+		man.addConfigInt(prefix+".conn_max_lifetime", 0, "MySQL maximum amount of time a connection may be reused"+usageSuffix)
+	}
 	// MySQL
-	man.addConfigString("mysql.protocol", "tcp",
-		"MySQL server communication protocol (tcp,unix,...)")
-	man.addConfigString("mysql.address", "localhost:3306",
-		"MySQL server address (host:port)")
-	man.addConfigString("mysql.username", "fleet",
-		"MySQL server username")
-	man.addConfigString("mysql.password", "",
-		"MySQL server password (prefer env variable for security)")
-	man.addConfigString("mysql.password_path", "",
-		"Path to file containg MySQL server password")
-	man.addConfigString("mysql.database", "fleet",
-		"MySQL database name")
-	man.addConfigString("mysql.tls_cert", "",
-		"MySQL TLS client certificate path")
-	man.addConfigString("mysql.tls_key", "",
-		"MySQL TLS client key path")
-	man.addConfigString("mysql.tls_ca", "",
-		"MySQL TLS server CA")
-	man.addConfigString("mysql.tls_server_name", "",
-		"MySQL TLS server name")
-	man.addConfigString("mysql.tls_config", "",
-		"MySQL TLS config value. Use skip-verify, true, false or custom key.")
-	man.addConfigInt("mysql.max_open_conns", 50, "MySQL maximum open connection handles.")
-	man.addConfigInt("mysql.max_idle_conns", 50, "MySQL maximum idle connection handles.")
-	man.addConfigInt("mysql.conn_max_lifetime", 0, "MySQL maximum amount of time a connection may be reused.")
+	addMysqlConfig("mysql", "localhost:3306", ".")
+	addMysqlConfig("mysql_read_replica", "", " for the read replica.")
 
 	// Redis
 	man.addConfigString("redis.address", "localhost:6379",
@@ -233,6 +331,21 @@ func (man Manager) addConfigs() {
 		"Redis server database number")
 	man.addConfigBool("redis.use_tls", false, "Redis server enable TLS")
 	man.addConfigBool("redis.duplicate_results", false, "Duplicate Live Query results to another Redis channel")
+	man.addConfigDuration("redis.connect_timeout", 5*time.Second, "Timeout at connection time")
+	man.addConfigDuration("redis.keep_alive", 10*time.Second, "Interval between keep alive probes")
+	man.addConfigInt("redis.connect_retry_attempts", 0, "Number of attempts to retry a failed connection")
+	man.addConfigBool("redis.cluster_follow_redirections", false, "Automatically follow Redis Cluster redirections")
+	man.addConfigBool("redis.cluster_read_from_replica", false, "Prefer reading from a replica when possible (for Redis Cluster)")
+	man.addConfigString("redis.tls_cert", "", "Redis TLS client certificate path")
+	man.addConfigString("redis.tls_key", "", "Redis TLS client key path")
+	man.addConfigString("redis.tls_ca", "", "Redis TLS server CA")
+	man.addConfigString("redis.tls_server_name", "", "Redis TLS server name")
+	man.addConfigDuration("redis.tls_handshake_timeout", 10*time.Second, "Redis TLS handshake timeout")
+	man.addConfigInt("redis.max_idle_conns", 3, "Redis maximum idle connections")
+	man.addConfigInt("redis.max_open_conns", 0, "Redis maximum open connections, 0 means no limit")
+	man.addConfigDuration("redis.conn_max_lifetime", 0, "Redis maximum amount of time a connection may be reused, 0 means no limit")
+	man.addConfigDuration("redis.idle_timeout", 240*time.Second, "Redis maximum amount of time a connection may stay idle, 0 means no limit")
+	man.addConfigDuration("redis.conn_wait_timeout", 0, "Redis maximum amount of time to wait for a connection if the maximum is reached (0 for no wait, ignored in non-cluster Redis)")
 
 	// Server
 	man.addConfigString("server.address", "0.0.0.0:8080",
@@ -268,8 +381,8 @@ func (man Manager) addConfigs() {
 	// Session
 	man.addConfigInt("session.key_size", 64,
 		"Size of generated session keys")
-	man.addConfigDuration("session.duration", 4*time.Hour,
-		"Duration session keys remain valid (i.e. 24h)")
+	man.addConfigDuration("session.duration", 24*time.Hour,
+		"Duration session keys remain valid (i.e. 4h)")
 
 	// Osquery
 	man.addConfigInt("osquery.node_key_size", 24,
@@ -284,6 +397,8 @@ func (man Manager) addConfigs() {
 		"Log plugin to use for result logs")
 	man.addConfigDuration("osquery.label_update_interval", 1*time.Hour,
 		"Interval to update host label membership (i.e. 1h)")
+	man.addConfigDuration("osquery.policy_update_interval", 1*time.Hour,
+		"Interval to update host policy membership (i.e. 1h)")
 	man.addConfigDuration("osquery.detail_update_interval", 1*time.Hour,
 		"Interval to update host details (i.e. 1h)")
 	man.addConfigString("osquery.status_log_file", "",
@@ -292,6 +407,28 @@ func (man Manager) addConfigs() {
 		"(DEPRECATED: Use filesystem.result_log_file) Path for osqueryd result logs")
 	man.addConfigBool("osquery.enable_log_rotation", false,
 		"(DEPRECATED: Use filesystem.enable_log_rotation) Enable automatic rotation for osquery log files")
+	man.addConfigInt("osquery.max_jitter_percent", 10,
+		"Maximum percentage of the interval to add as jitter")
+	man.addConfigBool("osquery.enable_async_host_processing", false,
+		"Enable asynchronous processing of host-reported query results")
+	man.addConfigDuration("osquery.async_host_collect_interval", 30*time.Second,
+		"Interval to collect asynchronous host-reported query results (i.e. 30s)")
+	man.addConfigInt("osquery.async_host_collect_max_jitter_percent", 10,
+		"Maximum percentage of the interval to collect asynchronous host results")
+	man.addConfigDuration("osquery.async_host_collect_lock_timeout", 1*time.Minute,
+		"Timeout of the exclusive lock held during async host collection")
+	man.addConfigDuration("osquery.async_host_collect_log_stats_interval", 1*time.Minute,
+		"Interval at which async host collection statistics are logged (0 disables logging of stats)")
+	man.addConfigInt("osquery.async_host_insert_batch", 2000,
+		"Batch size for async collection inserts in mysql")
+	man.addConfigInt("osquery.async_host_delete_batch", 2000,
+		"Batch size for async collection deletes in mysql")
+	man.addConfigInt("osquery.async_host_update_batch", 1000,
+		"Batch size for async collection updates in mysql")
+	man.addConfigInt("osquery.async_host_redis_pop_count", 1000,
+		"Batch size to pop items from redis in async collection")
+	man.addConfigInt("osquery.async_host_redis_scan_keys_count", 1000,
+		"Batch size to scan redis keys in async collection")
 
 	// Logging
 	man.addConfigBool("logging.debug", false,
@@ -300,6 +437,8 @@ func (man Manager) addConfigs() {
 		"Log in JSON format")
 	man.addConfigBool("logging.disable_banner", false,
 		"Disable startup banner")
+	man.addConfigDuration("logging.error_retention_period", 24*time.Hour,
+		"Amount of time to keep errors")
 
 	// Firehose
 	man.addConfigString("firehose.region", "", "AWS Region to use")
@@ -341,9 +480,13 @@ func (man Manager) addConfigs() {
 	// S3 for file carving
 	man.addConfigString("s3.bucket", "", "Bucket where to store file carves")
 	man.addConfigString("s3.prefix", "", "Prefix under which carves are stored")
+	man.addConfigString("s3.region", "", "AWS Region (if blank region is derived)")
+	man.addConfigString("s3.endpoint_url", "", "AWS Service Endpoint to use (leave blank for default service endpoints)")
 	man.addConfigString("s3.access_key_id", "", "Access Key ID for AWS authentication")
 	man.addConfigString("s3.secret_access_key", "", "Secret Access Key for AWS authentication")
 	man.addConfigString("s3.sts_assume_role_arn", "", "ARN of role to assume for AWS")
+	man.addConfigBool("s3.disable_ssl", false, "Disable SSL (typically for local testing)")
+	man.addConfigBool("s3.force_s3_path_style", false, "Set this to true to force path-style addressing, i.e., `http://s3.amazonaws.com/BUCKET/KEY`")
 
 	// PubSub
 	man.addConfigString("pubsub.project", "", "Google Cloud Project to use")
@@ -361,11 +504,17 @@ func (man Manager) addConfigs() {
 	man.addConfigBool("filesystem.enable_log_compression", false,
 		"Enable compression for the rotated osquery log files")
 
+	// KafkaREST
+	man.addConfigString("kafkarest.status_topic", "", "Kafka REST topic for status logs")
+	man.addConfigString("kafkarest.result_topic", "", "Kafka REST topic for result logs")
+	man.addConfigString("kafkarest.proxyhost", "", "Kafka REST proxy host url")
+	man.addConfigInt("kafkarest.timeout", 5, "Kafka REST proxy json post timeout")
+
 	// License
-	man.addConfigString("license.key", "", "Fleet license key (to enable Fleet Basic features)")
+	man.addConfigString("license.key", "", "Fleet license key (to enable Fleet Premium features)")
 
 	// Vulnerability processing
-	man.addConfigString("vulnerabilities.databases_path", "",
+	man.addConfigString("vulnerabilities.databases_path", "/tmp/vulndbs",
 		"Path where Fleet will download the data feeds to check CVEs")
 	man.addConfigDuration("vulnerabilities.periodicity", 1*time.Hour,
 		"How much time to wait between processing software for vulnerabilities.")
@@ -375,6 +524,12 @@ func (man Manager) addConfigs() {
 		"Prefix URL for the CVE data feed. If empty, default to https://nvd.nist.gov/")
 	man.addConfigString("vulnerabilities.current_instance_checks", "auto",
 		"Allows to manually select an instance to do the vulnerability processing.")
+	man.addConfigBool("vulnerabilities.disable_data_sync", false,
+		"Skips synchronizing data streams and expects them to be available in the databases_path.")
+
+	// Upgrades
+	man.addConfigBool("upgrades.allow_missing_migrations", false,
+		"Allow serve to run even if migrations are missing.")
 }
 
 // LoadConfig will load the config variables into a fully initialized
@@ -382,29 +537,49 @@ func (man Manager) addConfigs() {
 func (man Manager) LoadConfig() FleetConfig {
 	man.loadConfigFile()
 
+	loadMysqlConfig := func(prefix string) MysqlConfig {
+		return MysqlConfig{
+			Protocol:        man.getConfigString(prefix + ".protocol"),
+			Address:         man.getConfigString(prefix + ".address"),
+			Username:        man.getConfigString(prefix + ".username"),
+			Password:        man.getConfigString(prefix + ".password"),
+			PasswordPath:    man.getConfigString(prefix + ".password_path"),
+			Database:        man.getConfigString(prefix + ".database"),
+			TLSCert:         man.getConfigString(prefix + ".tls_cert"),
+			TLSKey:          man.getConfigString(prefix + ".tls_key"),
+			TLSCA:           man.getConfigString(prefix + ".tls_ca"),
+			TLSServerName:   man.getConfigString(prefix + ".tls_server_name"),
+			TLSConfig:       man.getConfigString(prefix + ".tls_config"),
+			MaxOpenConns:    man.getConfigInt(prefix + ".max_open_conns"),
+			MaxIdleConns:    man.getConfigInt(prefix + ".max_idle_conns"),
+			ConnMaxLifetime: man.getConfigInt(prefix + ".conn_max_lifetime"),
+		}
+	}
+
 	return FleetConfig{
-		Mysql: MysqlConfig{
-			Protocol:        man.getConfigString("mysql.protocol"),
-			Address:         man.getConfigString("mysql.address"),
-			Username:        man.getConfigString("mysql.username"),
-			Password:        man.getConfigString("mysql.password"),
-			PasswordPath:    man.getConfigString("mysql.password_path"),
-			Database:        man.getConfigString("mysql.database"),
-			TLSCert:         man.getConfigString("mysql.tls_cert"),
-			TLSKey:          man.getConfigString("mysql.tls_key"),
-			TLSCA:           man.getConfigString("mysql.tls_ca"),
-			TLSServerName:   man.getConfigString("mysql.tls_server_name"),
-			TLSConfig:       man.getConfigString("mysql.tls_config"),
-			MaxOpenConns:    man.getConfigInt("mysql.max_open_conns"),
-			MaxIdleConns:    man.getConfigInt("mysql.max_idle_conns"),
-			ConnMaxLifetime: man.getConfigInt("mysql.conn_max_lifetime"),
-		},
+		Mysql:            loadMysqlConfig("mysql"),
+		MysqlReadReplica: loadMysqlConfig("mysql_read_replica"),
 		Redis: RedisConfig{
-			Address:          man.getConfigString("redis.address"),
-			Password:         man.getConfigString("redis.password"),
-			Database:         man.getConfigInt("redis.database"),
-			UseTLS:           man.getConfigBool("redis.use_tls"),
-			DuplicateResults: man.getConfigBool("redis.duplicate_results"),
+			Address:                   man.getConfigString("redis.address"),
+			Password:                  man.getConfigString("redis.password"),
+			Database:                  man.getConfigInt("redis.database"),
+			UseTLS:                    man.getConfigBool("redis.use_tls"),
+			DuplicateResults:          man.getConfigBool("redis.duplicate_results"),
+			ConnectTimeout:            man.getConfigDuration("redis.connect_timeout"),
+			KeepAlive:                 man.getConfigDuration("redis.keep_alive"),
+			ConnectRetryAttempts:      man.getConfigInt("redis.connect_retry_attempts"),
+			ClusterFollowRedirections: man.getConfigBool("redis.cluster_follow_redirections"),
+			ClusterReadFromReplica:    man.getConfigBool("redis.cluster_read_from_replica"),
+			TLSCert:                   man.getConfigString("redis.tls_cert"),
+			TLSKey:                    man.getConfigString("redis.tls_key"),
+			TLSCA:                     man.getConfigString("redis.tls_ca"),
+			TLSServerName:             man.getConfigString("redis.tls_server_name"),
+			TLSHandshakeTimeout:       man.getConfigDuration("redis.tls_handshake_timeout"),
+			MaxIdleConns:              man.getConfigInt("redis.max_idle_conns"),
+			MaxOpenConns:              man.getConfigInt("redis.max_open_conns"),
+			ConnMaxLifetime:           man.getConfigDuration("redis.conn_max_lifetime"),
+			IdleTimeout:               man.getConfigDuration("redis.idle_timeout"),
+			ConnWaitTimeout:           man.getConfigDuration("redis.conn_wait_timeout"),
 		},
 		Server: ServerConfig{
 			Address:    man.getConfigString("server.address"),
@@ -428,21 +603,34 @@ func (man Manager) LoadConfig() FleetConfig {
 			Duration: man.getConfigDuration("session.duration"),
 		},
 		Osquery: OsqueryConfig{
-			NodeKeySize:          man.getConfigInt("osquery.node_key_size"),
-			HostIdentifier:       man.getConfigString("osquery.host_identifier"),
-			EnrollCooldown:       man.getConfigDuration("osquery.enroll_cooldown"),
-			StatusLogPlugin:      man.getConfigString("osquery.status_log_plugin"),
-			ResultLogPlugin:      man.getConfigString("osquery.result_log_plugin"),
-			StatusLogFile:        man.getConfigString("osquery.status_log_file"),
-			ResultLogFile:        man.getConfigString("osquery.result_log_file"),
-			LabelUpdateInterval:  man.getConfigDuration("osquery.label_update_interval"),
-			DetailUpdateInterval: man.getConfigDuration("osquery.detail_update_interval"),
-			EnableLogRotation:    man.getConfigBool("osquery.enable_log_rotation"),
+			NodeKeySize:                      man.getConfigInt("osquery.node_key_size"),
+			HostIdentifier:                   man.getConfigString("osquery.host_identifier"),
+			EnrollCooldown:                   man.getConfigDuration("osquery.enroll_cooldown"),
+			StatusLogPlugin:                  man.getConfigString("osquery.status_log_plugin"),
+			ResultLogPlugin:                  man.getConfigString("osquery.result_log_plugin"),
+			StatusLogFile:                    man.getConfigString("osquery.status_log_file"),
+			ResultLogFile:                    man.getConfigString("osquery.result_log_file"),
+			LabelUpdateInterval:              man.getConfigDuration("osquery.label_update_interval"),
+			PolicyUpdateInterval:             man.getConfigDuration("osquery.policy_update_interval"),
+			DetailUpdateInterval:             man.getConfigDuration("osquery.detail_update_interval"),
+			EnableLogRotation:                man.getConfigBool("osquery.enable_log_rotation"),
+			MaxJitterPercent:                 man.getConfigInt("osquery.max_jitter_percent"),
+			EnableAsyncHostProcessing:        man.getConfigBool("osquery.enable_async_host_processing"),
+			AsyncHostCollectInterval:         man.getConfigDuration("osquery.async_host_collect_interval"),
+			AsyncHostCollectMaxJitterPercent: man.getConfigInt("osquery.async_host_collect_max_jitter_percent"),
+			AsyncHostCollectLockTimeout:      man.getConfigDuration("osquery.async_host_collect_lock_timeout"),
+			AsyncHostCollectLogStatsInterval: man.getConfigDuration("osquery.async_host_collect_log_stats_interval"),
+			AsyncHostInsertBatch:             man.getConfigInt("osquery.async_host_insert_batch"),
+			AsyncHostDeleteBatch:             man.getConfigInt("osquery.async_host_delete_batch"),
+			AsyncHostUpdateBatch:             man.getConfigInt("osquery.async_host_update_batch"),
+			AsyncHostRedisPopCount:           man.getConfigInt("osquery.async_host_redis_pop_count"),
+			AsyncHostRedisScanKeysCount:      man.getConfigInt("osquery.async_host_redis_scan_keys_count"),
 		},
 		Logging: LoggingConfig{
-			Debug:         man.getConfigBool("logging.debug"),
-			JSON:          man.getConfigBool("logging.json"),
-			DisableBanner: man.getConfigBool("logging.disable_banner"),
+			Debug:                man.getConfigBool("logging.debug"),
+			JSON:                 man.getConfigBool("logging.json"),
+			DisableBanner:        man.getConfigBool("logging.disable_banner"),
+			ErrorRetentionPeriod: man.getConfigDuration("logging.error_retention_period"),
 		},
 		Firehose: FirehoseConfig{
 			Region:           man.getConfigString("firehose.region"),
@@ -473,9 +661,13 @@ func (man Manager) LoadConfig() FleetConfig {
 		S3: S3Config{
 			Bucket:           man.getConfigString("s3.bucket"),
 			Prefix:           man.getConfigString("s3.prefix"),
+			Region:           man.getConfigString("s3.region"),
+			EndpointURL:      man.getConfigString("s3.endpoint_url"),
 			AccessKeyID:      man.getConfigString("s3.access_key_id"),
 			SecretAccessKey:  man.getConfigString("s3.secret_access_key"),
 			StsAssumeRoleArn: man.getConfigString("s3.sts_assume_role_arn"),
+			DisableSSL:       man.getConfigBool("s3.disable_ssl"),
+			ForceS3PathStyle: man.getConfigBool("s3.force_s3_path_style"),
 		},
 		PubSub: PubSubConfig{
 			Project:       man.getConfigString("pubsub.project"),
@@ -489,6 +681,12 @@ func (man Manager) LoadConfig() FleetConfig {
 			EnableLogRotation:    man.getConfigBool("filesystem.enable_log_rotation"),
 			EnableLogCompression: man.getConfigBool("filesystem.enable_log_compression"),
 		},
+		KafkaREST: KafkaRESTConfig{
+			StatusTopic: man.getConfigString("kafkarest.status_topic"),
+			ResultTopic: man.getConfigString("kafkarest.result_topic"),
+			ProxyHost:   man.getConfigString("kafkarest.proxyhost"),
+			Timeout:     man.getConfigInt("kafkarest.timeout"),
+		},
 		License: LicenseConfig{
 			Key: man.getConfigString("license.key"),
 		},
@@ -498,6 +696,10 @@ func (man Manager) LoadConfig() FleetConfig {
 			CPEDatabaseURL:        man.getConfigString("vulnerabilities.cpe_database_url"),
 			CVEFeedPrefixURL:      man.getConfigString("vulnerabilities.cve_feed_prefix_url"),
 			CurrentInstanceChecks: man.getConfigString("vulnerabilities.current_instance_checks"),
+			DisableDataSync:       man.getConfigBool("vulnerabilities.disable_data_sync"),
+		},
+		Upgrades: UpgradesConfig{
+			AllowMissingMigrations: man.getConfigBool("upgrades.allow_missing_migrations"),
 		},
 	}
 }
@@ -686,7 +888,6 @@ func (man Manager) loadConfigFile() {
 
 	man.viper.SetConfigFile(configFile)
 	err := man.viper.ReadInConfig()
-
 	if err != nil {
 		fmt.Println("Error loading config file:", err)
 		os.Exit(1)
@@ -698,7 +899,7 @@ func (man Manager) loadConfigFile() {
 // TestConfig returns a barebones configuration suitable for use in tests.
 // Individual tests may want to override some of the values provided.
 func TestConfig() FleetConfig {
-	var testLogFile = "/dev/null"
+	testLogFile := "/dev/null"
 	if runtime.GOOS == "windows" {
 		testLogFile = "NUL"
 	}
@@ -722,7 +923,9 @@ func TestConfig() FleetConfig {
 			StatusLogPlugin:      "filesystem",
 			ResultLogPlugin:      "filesystem",
 			LabelUpdateInterval:  1 * time.Hour,
+			PolicyUpdateInterval: 1 * time.Hour,
 			DetailUpdateInterval: 1 * time.Hour,
+			MaxJitterPercent:     0,
 		},
 		Logging: LoggingConfig{
 			Debug:         true,

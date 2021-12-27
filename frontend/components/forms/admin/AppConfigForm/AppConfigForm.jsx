@@ -8,15 +8,14 @@ import Dropdown from "components/forms/fields/Dropdown";
 import Form from "components/forms/Form";
 import formFieldInterface from "interfaces/form_field";
 import enrollSecretInterface from "interfaces/enroll_secret";
-import EnrollSecretTable from "components/config/EnrollSecretTable";
+import EnrollSecretTable from "components/EnrollSecretTable";
 import InputField from "components/forms/fields/InputField";
 import OrgLogoIcon from "components/icons/OrgLogoIcon";
-import Slider from "components/forms/fields/Slider";
 import validate from "components/forms/admin/AppConfigForm/validate";
 import IconToolTip from "components/IconToolTip";
 import InfoBanner from "components/InfoBanner/InfoBanner";
 import YamlAce from "components/YamlAce";
-import Modal from "components/modals/Modal";
+import Modal from "components/Modal";
 import OpenNewTabIcon from "../../../../../assets/images/open-new-tab-12x12@2x.png";
 
 const authMethodOptions = [
@@ -28,6 +27,19 @@ const authTypeOptions = [
   { label: "Username and Password", value: "authtype_username_password" },
   { label: "None", value: "authtype_none" },
 ];
+const percentageOfHosts = [
+  { label: "1%", value: 1 },
+  { label: "5%", value: 5 },
+  { label: "10%", value: 10 },
+  { label: "25%", value: 25 },
+];
+const numberOfDays = [
+  { label: "1 day", value: 1 },
+  { label: "3 days", value: 3 },
+  { label: "7 days", value: 7 },
+  { label: "14 days", value: 14 },
+];
+
 const baseClass = "app-config-form";
 const formFields = [
   "authentication_method",
@@ -58,27 +70,12 @@ const formFields = [
   "host_expiry_window",
   "live_query_disabled",
   "agent_options",
+  "enable_host_status_webhook",
+  "destination_url",
+  "host_percentage",
+  "days_count",
   "enable_analytics",
 ];
-const Header = ({ showAdvancedOptions }) => {
-  const CaratIcon = (
-    <Button
-      className={`button button--unstyled ${
-        showAdvancedOptions ? "upcarat" : "downcarat"
-      }`}
-    />
-  );
-
-  return (
-    <span>
-      Advanced Options {CaratIcon}{" "}
-      <small>Most users do not need to modify these options.</small>
-    </span>
-  );
-};
-
-Header.propTypes = { showAdvancedOptions: PropTypes.bool.isRequired };
-
 class AppConfigForm extends Component {
   static propTypes = {
     fields: PropTypes.shape({
@@ -109,9 +106,13 @@ class AppConfigForm extends Component {
       host_expiry_window: formFieldInterface.isRequired,
       live_query_disabled: formFieldInterface.isRequired,
       agent_options: formFieldInterface.isRequired,
+      enable_host_status_webhook: formFieldInterface.isRequired,
+      destination_url: formFieldInterface,
+      host_percentage: formFieldInterface,
+      days_count: formFieldInterface,
       enable_analytics: formFieldInterface.isRequired,
     }).isRequired,
-    enrollSecret: enrollSecretInterface.isRequired,
+    enrollSecret: PropTypes.arrayOf(enrollSecretInterface).isRequired,
     handleSubmit: PropTypes.func.isRequired,
     smtpConfigured: PropTypes.bool.isRequired,
   };
@@ -120,19 +121,16 @@ class AppConfigForm extends Component {
     super(props);
 
     this.state = {
-      showAdvancedOptions: false,
+      showHostStatusWebhookPreviewModal: false,
       showUsageStatsPreviewModal: false,
     };
   }
 
-  onToggleAdvancedOptions = (evt) => {
-    evt.preventDefault();
-
-    const { showAdvancedOptions } = this.state;
-
-    this.setState({ showAdvancedOptions: !showAdvancedOptions });
-
-    return false;
+  toggleHostStatusWebhookPreviewModal = () => {
+    const { showHostStatusWebhookPreviewModal } = this.state;
+    this.setState({
+      showHostStatusWebhookPreviewModal: !showHostStatusWebhookPreviewModal,
+    });
   };
 
   toggleUsageStatsPreviewModal = () => {
@@ -144,46 +142,75 @@ class AppConfigForm extends Component {
 
   renderAdvancedOptions = () => {
     const { fields } = this.props;
-    const { showAdvancedOptions } = this.state;
-
-    if (!showAdvancedOptions) {
-      return false;
-    }
 
     return (
-      <div>
+      <div className={`${baseClass}__advanced-options`}>
+        <p className={`${baseClass}__section-description`}>
+          Most users do not need to modify these options.
+        </p>
         <div className={`${baseClass}__inputs`}>
-          <div className={`${baseClass}__smtp-section`}>
-            <InputField {...fields.domain} label="Domain" />
-            <Slider {...fields.verify_ssl_certs} label="Verify SSL Certs?" />
-            <Slider {...fields.enable_start_tls} label="Enable STARTTLS?" />
-            <Slider {...fields.host_expiry_enabled} label="Host Expiry" />
-            <InputField
-              {...fields.host_expiry_window}
-              disabled={!fields.host_expiry_enabled.value}
-              label="Host Expiry Window"
-            />
-            <Slider
-              {...fields.live_query_disabled}
-              label="Disable Live Queries?"
-            />
+          <div className={`${baseClass}__form-fields`}>
+            <div className="tooltip-wrap tooltip-wrap--input">
+              <InputField {...fields.domain} label="Domain" />
+              <IconToolTip
+                isHtml
+                text={
+                  '<p>If you need to specify a HELO domain, <br />you can do it here <em className="hint hint--brand">(Default: <strong>Blank</strong>)</em></p>'
+                }
+              />
+            </div>
+            <div className="tooltip-wrap">
+              <Checkbox {...fields.verify_ssl_certs}>Verify SSL certs</Checkbox>
+              <IconToolTip
+                isHtml
+                text={
+                  '<p>Turn this off (not recommended) <br />if you use a self-signed certificate <em className="hint hint--brand"><br />(Default: <strong>On</strong>)</em></p>'
+                }
+              />
+            </div>
+            <div className="tooltip-wrap">
+              <Checkbox {...fields.enable_start_tls}>Enable STARTTLS</Checkbox>
+              <IconToolTip
+                isHtml
+                text={
+                  '<p>Detects if STARTTLS is enabled <br />in your SMTP server and starts <br />to use it. <em className="hint hint--brand">(Default: <strong>On</strong>)</em></p>'
+                }
+              />
+            </div>
+            <div className="tooltip-wrap">
+              <Checkbox {...fields.host_expiry_enabled}>Host expiry</Checkbox>
+              <IconToolTip
+                isHtml
+                text={
+                  '<p>When enabled, allows automatic cleanup <br />of hosts that have not communicated with Fleet <br />in some number of days. <em className="hint hint--brand">(Default: <strong>Off</strong>)</em></p>'
+                }
+              />
+            </div>
+            <div className="tooltip-wrap tooltip-wrap--input">
+              <InputField
+                {...fields.host_expiry_window}
+                disabled={!fields.host_expiry_enabled.value}
+                label="Host Expiry Window"
+              />
+              <IconToolTip
+                isHtml
+                text={
+                  "<p>If a host has not communicated with Fleet <br />in the specified number of days, it will be removed.</p>"
+                }
+              />
+            </div>
+            <div className="tooltip-wrap">
+              <Checkbox {...fields.live_query_disabled}>
+                Disable live queries
+              </Checkbox>
+              <IconToolTip
+                isHtml
+                text={
+                  '<p>When enabled, disables the ability to run live queries <br />(ad hoc queries executed via the UI or fleetctl). <em className="hint hint--brand">(Default: <strong>Off</strong>)</em></p>'
+                }
+              />
+            </div>
           </div>
-        </div>
-
-        <div className={`${baseClass}__details`}>
-          <IconToolTip
-            isHtml
-            text={
-              '\
-              <p><strong>Domain</strong> - If you need to specify a HELO domain, you can do it here <em className="hint hint--brand">(Default: <strong>Blank</strong>)</em></p>\
-              <p><strong>Verify SSL Certs</strong> - Turn this off (not recommended) if you use a self-signed certificate <em className="hint hint--brand">(Default: <strong>On</strong>)</em></p>\
-              <p><strong>Enable STARTTLS</strong> - Detects if STARTTLS is enabled in your SMTP server and starts to use it. <em className="hint hint--brand">(Default: <strong>On</strong>)</em></p>\
-              <p><strong>Host Expiry</strong> - When enabled, allows automatic cleanup of hosts that have not communicated with Fleet in some number of days. <em className="hint hint--brand">(Default: <strong>Off</strong>)</em></p>\
-              <p><strong>Host Expiry Window</strong> - If a host has not communicated with Fleet in the specified number of days, it will be removed.</p>\
-              <p><strong>Disable Live Queries</strong> - When enabled, disables the ability to run live queries (ad hoc queries executed via the UI or fleetctl). <em className="hint hint--brand">(Default: <strong>Off</strong>)</em></p>\
-            '
-            }
-          />
         </div>
       </div>
     );
@@ -198,19 +225,58 @@ class AppConfigForm extends Component {
 
     return (
       <div className={`${baseClass}__smtp-section`}>
-        <InputField {...fields.user_name} label="SMTP Username" />
+        <InputField {...fields.user_name} label="SMTP username" />
         <InputField
           {...fields.password}
-          label="SMTP Password"
+          label="SMTP password"
           type="password"
         />
         <Dropdown
           {...fields.authentication_method}
-          label="Auth Method"
+          label="Auth method"
           options={authMethodOptions}
           placeholder=""
         />
       </div>
+    );
+  };
+
+  renderHostStatusWebhookPreviewModal = () => {
+    const { toggleHostStatusWebhookPreviewModal } = this;
+    const { showHostStatusWebhookPreviewModal } = this.state;
+
+    if (!showHostStatusWebhookPreviewModal) {
+      return null;
+    }
+
+    const json = {
+      text:
+        "More than X% of your hosts have not checked into Fleet for more than Y days. You’ve been sent this message because the Host status webhook is enabled in your Fleet instance.",
+      data: {
+        unseen_hosts: 1,
+        total_hosts: 2,
+        days_unseen: 3,
+      },
+    };
+
+    return (
+      <Modal
+        title="Host status webhook"
+        onExit={toggleHostStatusWebhookPreviewModal}
+        className={`${baseClass}__host-status-webhook-preview-modal`}
+      >
+        <p>
+          An example request sent to your configured <b>Destination URL</b>.
+        </p>
+        <div className={`${baseClass}__host-status-webhook-preview`}>
+          <pre dangerouslySetInnerHTML={{ __html: syntaxHighlight(json) }} />
+        </div>
+        <div className="flex-end">
+          <Button type="button" onClick={toggleHostStatusWebhookPreviewModal}>
+            Done
+          </Button>
+        </div>
+      </Modal>
     );
   };
 
@@ -222,10 +288,19 @@ class AppConfigForm extends Component {
       return null;
     }
 
-    const json = {
-      anonymous_identifier: "wmTH972f06USpahr41LHpgLKAhgZL",
-      fleet_version: "x.x.x",
-      hosts_enrolled_count: 12345,
+    const stats = {
+      anonymousIdentifier: "9pnzNmrES3mQG66UQtd29cYTiX2+fZ4CYxDvh495720=",
+      fleetVersion: "x.x.x",
+      licenseTier: "free",
+      numHostsEnrolled: 12345,
+      numUsers: 12,
+      numTeams: 3,
+      numPolicies: 5,
+      numLabels: 20,
+      softwareInventoryEnabled: true,
+      vulnDetectionEnabled: true,
+      systemUsersEnabled: true,
+      hostStatusWebhookEnabled: true,
     };
 
     return (
@@ -235,7 +310,7 @@ class AppConfigForm extends Component {
         className={`${baseClass}__usage-stats-preview-modal`}
       >
         <p>An example JSON payload sent to Fleet Device Management Inc.</p>
-        <pre dangerouslySetInnerHTML={{ __html: syntaxHighlight(json) }} />
+        <pre dangerouslySetInnerHTML={{ __html: syntaxHighlight(stats) }} />
         <div className="flex-end">
           <Button type="button" onClick={toggleUsageStatsPreviewModal}>
             Done
@@ -248,20 +323,20 @@ class AppConfigForm extends Component {
   render() {
     const { fields, handleSubmit, smtpConfigured, enrollSecret } = this.props;
     const {
-      onToggleAdvancedOptions,
       renderAdvancedOptions,
       renderSmtpSection,
+      toggleHostStatusWebhookPreviewModal,
       toggleUsageStatsPreviewModal,
+      renderHostStatusWebhookPreviewModal,
       renderUsageStatsPreviewModal,
     } = this;
-    const { showAdvancedOptions } = this.state;
 
     return (
       <>
-        <form className={baseClass} onSubmit={handleSubmit}>
+        <form className={baseClass} onSubmit={handleSubmit} autoComplete="off">
           <div className={`${baseClass}__section`}>
             <h2>
-              <a id="organization-info">Organization Info</a>
+              <a id="organization-info">Organization info</a>
             </h2>
             <div className={`${baseClass}__inputs`}>
               <InputField {...fields.org_name} label="Organization name" />
@@ -283,7 +358,7 @@ class AppConfigForm extends Component {
             <div className={`${baseClass}__inputs`}>
               <InputField
                 {...fields.server_url}
-                label="Fleet App URL"
+                label="Fleet app URL"
                 hint={
                   <span>
                     Include base path only (eg. no <code>/v1</code>)
@@ -300,15 +375,15 @@ class AppConfigForm extends Component {
 
           <div className={`${baseClass}__section`}>
             <h2>
-              <a id="saml">SAML Single Sign On Options</a>
+              <a id="saml">SAML single sign on options</a>
             </h2>
 
             <div className={`${baseClass}__inputs`}>
-              <Checkbox {...fields.enable_sso}>Enable Single Sign On</Checkbox>
+              <Checkbox {...fields.enable_sso}>Enable single sign on</Checkbox>
             </div>
 
             <div className={`${baseClass}__inputs`}>
-              <InputField {...fields.idp_name} label="Identity Provider Name" />
+              <InputField {...fields.idp_name} label="Identity provider name" />
             </div>
             <div className={`${baseClass}__details`}>
               <IconToolTip
@@ -348,7 +423,7 @@ class AppConfigForm extends Component {
             </div>
 
             <div className={`${baseClass}__inputs`}>
-              <InputField {...fields.idp_image_url} label="IDP Image URL" />
+              <InputField {...fields.idp_image_url} label="IDP image URL" />
             </div>
             <div className={`${baseClass}__details`}>
               <IconToolTip
@@ -401,7 +476,7 @@ class AppConfigForm extends Component {
           <div className={`${baseClass}__section`}>
             <h2>
               <a id="smtp">
-                SMTP Options{" "}
+                SMTP options{" "}
                 <small
                   className={`smtp-options smtp-options--${
                     smtpConfigured ? "configured" : "notconfigured"
@@ -417,14 +492,14 @@ class AppConfigForm extends Component {
             </div>
 
             <div className={`${baseClass}__inputs`}>
-              <InputField {...fields.sender_address} label="Sender Address" />
+              <InputField {...fields.sender_address} label="Sender address" />
             </div>
             <div className={`${baseClass}__details`}>
               <IconToolTip text={"The sender address for emails from Fleet."} />
             </div>
 
             <div className={`${baseClass}__inputs ${baseClass}__inputs--smtp`}>
-              <InputField {...fields.server} label="SMTP Server" />
+              <InputField {...fields.server} label="SMTP server" />
               <InputField {...fields.port} label="&nbsp;" type="number" />
               <Checkbox {...fields.enable_ssl_tls}>
                 Use SSL/TLS to connect (recommended)
@@ -433,7 +508,7 @@ class AppConfigForm extends Component {
             <div className={`${baseClass}__details`}>
               <IconToolTip
                 text={
-                  "The hostname / IP address and corresponding port of your organization&apos;s SMTP server."
+                  "The hostname / IP address and corresponding port of your organization's SMTP server."
                 }
               />
             </div>
@@ -441,7 +516,7 @@ class AppConfigForm extends Component {
             <div className={`${baseClass}__inputs`}>
               <Dropdown
                 {...fields.authentication_type}
-                label="Authentication Type"
+                label="Authentication type"
                 options={authTypeOptions}
               />
               {renderSmtpSection()}
@@ -462,7 +537,7 @@ class AppConfigForm extends Component {
 
           <div className={`${baseClass}__section`}>
             <h2>
-              <a id="osquery-enrollment-secrets">Osquery Enrollment Secrets</a>
+              <a id="osquery-enrollment-secrets">Osquery enrollment secrets</a>
             </h2>
             <div className={`${baseClass}__inputs`}>
               <p className={`${baseClass}__enroll-secret-label`}>
@@ -516,6 +591,89 @@ class AppConfigForm extends Component {
 
           <div className={`${baseClass}__section`}>
             <h2>
+              <a id="host-status-webhook">Host status webhook</a>
+            </h2>
+            <div className={`${baseClass}__host-status-webhook`}>
+              <p className={`${baseClass}__section-description`}>
+                Send an alert if a portion of your hosts go offline.
+              </p>
+              <Checkbox {...fields.enable_host_status_webhook}>
+                Enable host status webhook
+              </Checkbox>
+              <p className={`${baseClass}__section-description`}>
+                A request will be sent to your configured <b>Destination URL</b>{" "}
+                if the configured <b>Percentage of hosts</b> have not checked
+                into Fleet for the configured <b>Number of days</b>.
+              </p>
+            </div>
+            <div
+              className={`${baseClass}__inputs ${baseClass}__inputs--webhook`}
+            >
+              <Button
+                type="button"
+                variant="inverse"
+                onClick={toggleHostStatusWebhookPreviewModal}
+              >
+                Preview request
+              </Button>
+            </div>
+            <div className={`${baseClass}__inputs`}>
+              <InputField
+                {...fields.destination_url}
+                placeholder="https://server.com/example"
+                label="Destination URL"
+              />
+            </div>
+            <div className={`${baseClass}__details`}>
+              <IconToolTip
+                isHtml
+                text={
+                  "\
+                  <center><p>Provide a URL to deliver <br/>the webhook request to.</p></center>\
+                "
+                }
+              />
+            </div>
+            <div
+              className={`${baseClass}__inputs ${baseClass}__host-percentage`}
+            >
+              <Dropdown
+                {...fields.host_percentage}
+                label="Percentage of hosts"
+                options={percentageOfHosts}
+              />
+            </div>
+            <div className={`${baseClass}__details`}>
+              <IconToolTip
+                isHtml
+                text={
+                  "\
+                  <center><p>Select the minimum percentage of hosts that<br/>must fail to check into Fleet in order to trigger<br/>the webhook request.</p></center>\
+                "
+                }
+              />
+            </div>
+            <div className={`${baseClass}__inputs ${baseClass}__days-count`}>
+              <Dropdown
+                {...fields.days_count}
+                label="Number of days"
+                options={numberOfDays}
+              />
+            </div>
+            <div className={`${baseClass}__details`}>
+              <IconToolTip
+                isHtml
+                text={
+                  "\
+                  <center><p>Select the minimum number of days that the<br/>configured <b>Percentage of hosts</b> must fail to<br/>check into Fleet in order to trigger the<br/>webhook request.</p></center>\
+                "
+                }
+              />
+            </div>
+          </div>
+
+          <div className={`${baseClass}__section`}>
+            <h2>
               <a id="usage-stats">Usage statistics</a>
             </h2>
             <p className={`${baseClass}__section-description`}>
@@ -555,13 +713,7 @@ class AppConfigForm extends Component {
 
           <div className={`${baseClass}__section`}>
             <h2>
-              <a
-                id="advanced-options"
-                onClick={onToggleAdvancedOptions}
-                className={`${baseClass}__show-options`}
-              >
-                <Header showAdvancedOptions={showAdvancedOptions} />
-              </a>
+              <a id="advanced-options">Advanced options</a>
             </h2>
             {renderAdvancedOptions()}
           </div>
@@ -570,6 +722,7 @@ class AppConfigForm extends Component {
           </Button>
         </form>
         {renderUsageStatsPreviewModal()}
+        {renderHostStatusWebhookPreviewModal()}
       </>
     );
   }

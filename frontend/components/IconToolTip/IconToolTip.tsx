@@ -1,15 +1,18 @@
 import React from "react";
 import ReactTooltip from "react-tooltip";
 
-interface IIconToolTipProps {
+export interface IIconToolTipProps {
   text: string;
   isHtml?: boolean;
   issue?: boolean;
 }
 
 // TODO: handle html text better. possibly use 'children' prop for html
-const IconToolTip = (props: IIconToolTipProps): JSX.Element => {
-  const { text, isHtml, issue } = props;
+const IconToolTip = ({
+  text,
+  isHtml,
+  issue,
+}: IIconToolTipProps): JSX.Element => {
   let svgIcon = (
     <svg
       width="16"
@@ -30,9 +33,9 @@ const IconToolTip = (props: IIconToolTipProps): JSX.Element => {
     svgIcon = (
       <svg
         xmlns="http://www.w3.org/2000/svg"
-        width="16"
-        height="16"
-        viewBox="0 0 16 16"
+        width="24"
+        height="24"
+        viewBox="0 -6.5 24 24"
         fill="none"
       >
         <path

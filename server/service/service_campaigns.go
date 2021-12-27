@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fleetdm/fleet/v4/server/authz"
+	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/contexts/logging"
 	"github.com/fleetdm/fleet/v4/server/contexts/viewer"
 	"github.com/fleetdm/fleet/v4/server/fleet"
@@ -14,7 +15,6 @@ import (
 	"github.com/fleetdm/fleet/v4/server/websocket"
 	"github.com/go-kit/kit/log/level"
 	"github.com/igm/sockjs-go/v3/sockjs"
-	"github.com/pkg/errors"
 )
 
 func (svc Service) NewDistributedQueryCampaignByNames(ctx context.Context, queryString string, queryID *uint, hosts []string, labels []string) (*fleet.DistributedQueryCampaign, error) {
@@ -24,14 +24,14 @@ func (svc Service) NewDistributedQueryCampaignByNames(ctx context.Context, query
 	}
 	filter := fleet.TeamFilter{User: vc.User, IncludeObserver: true}
 
-	hostIDs, err := svc.ds.HostIDsByName(filter, hosts)
+	hostIDs, err := svc.ds.HostIDsByName(ctx, filter, hosts)
 	if err != nil {
-		return nil, errors.Wrap(err, "finding host IDs")
+		return nil, ctxerr.Wrap(ctx, err, "finding host IDs")
 	}
 
-	labelIDs, err := svc.ds.LabelIDsByName(labels)
+	labelIDs, err := svc.ds.LabelIDsByName(ctx, labels)
 	if err != nil {
-		return nil, errors.Wrap(err, "finding label IDs")
+		return nil, ctxerr.Wrap(ctx, err, "finding label IDs")
 	}
 
 	targets := fleet.HostTargets{HostIDs: hostIDs, LabelIDs: labelIDs}
@@ -55,13 +55,13 @@ func (svc Service) NewDistributedQueryCampaign(ctx context.Context, queryString 
 	var query *fleet.Query
 	var err error
 	if queryID != nil {
-		query, err = svc.ds.Query(*queryID)
+		query, err = svc.ds.Query(ctx, *queryID)
 		if err != nil {
 			return nil, err
 		}
 		queryString = query.Query
 	} else {
-		if err := svc.authz.Authorize(ctx, &fleet.Query{}, fleet.ActionWrite); err != nil {
+		if err := svc.authz.Authorize(ctx, &fleet.Query{}, fleet.ActionRunNew); err != nil {
 			return nil, err
 		}
 		query = &fleet.Query{
@@ -74,9 +74,9 @@ func (svc Service) NewDistributedQueryCampaign(ctx context.Context, queryString 
 		if err != nil {
 			return nil, err
 		}
-		query, err = svc.ds.NewQuery(query)
+		query, err = svc.ds.NewQuery(ctx, query)
 		if err != nil {
-			return nil, errors.Wrap(err, "new query")
+			return nil, ctxerr.Wrap(ctx, err, "new query")
 		}
 	}
 
@@ -86,17 +86,17 @@ func (svc Service) NewDistributedQueryCampaign(ctx context.Context, queryString 
 
 	filter := fleet.TeamFilter{User: vc.User, IncludeObserver: query.ObserverCanRun}
 
-	campaign, err := svc.ds.NewDistributedQueryCampaign(&fleet.DistributedQueryCampaign{
+	campaign, err := svc.ds.NewDistributedQueryCampaign(ctx, &fleet.DistributedQueryCampaign{
 		QueryID: query.ID,
 		Status:  fleet.QueryWaiting,
 		UserID:  vc.UserID(),
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "new campaign")
+		return nil, ctxerr.Wrap(ctx, err, "new campaign")
 	}
 
 	defer func() {
-		var numHosts uint = 0
+		var numHosts uint
 		if campaign != nil {
 			numHosts = campaign.Metrics.TotalHosts
 		}
@@ -105,56 +105,57 @@ func (svc Service) NewDistributedQueryCampaign(ctx context.Context, queryString 
 
 	// Add host targets
 	for _, hid := range targets.HostIDs {
-		_, err = svc.ds.NewDistributedQueryCampaignTarget(&fleet.DistributedQueryCampaignTarget{
+		_, err = svc.ds.NewDistributedQueryCampaignTarget(ctx, &fleet.DistributedQueryCampaignTarget{
 			Type:                       fleet.TargetHost,
 			DistributedQueryCampaignID: campaign.ID,
 			TargetID:                   hid,
 		})
 		if err != nil {
-			return nil, errors.Wrap(err, "adding host target")
+			return nil, ctxerr.Wrap(ctx, err, "adding host target")
 		}
 	}
 
 	// Add label targets
 	for _, lid := range targets.LabelIDs {
-		_, err = svc.ds.NewDistributedQueryCampaignTarget(&fleet.DistributedQueryCampaignTarget{
+		_, err = svc.ds.NewDistributedQueryCampaignTarget(ctx, &fleet.DistributedQueryCampaignTarget{
 			Type:                       fleet.TargetLabel,
 			DistributedQueryCampaignID: campaign.ID,
 			TargetID:                   lid,
 		})
 		if err != nil {
-			return nil, errors.Wrap(err, "adding label target")
+			return nil, ctxerr.Wrap(ctx, err, "adding label target")
 		}
 	}
 
 	// Add team targets
 	for _, tid := range targets.TeamIDs {
-		_, err = svc.ds.NewDistributedQueryCampaignTarget(&fleet.DistributedQueryCampaignTarget{
+		_, err = svc.ds.NewDistributedQueryCampaignTarget(ctx, &fleet.DistributedQueryCampaignTarget{
 			Type:                       fleet.TargetTeam,
 			DistributedQueryCampaignID: campaign.ID,
 			TargetID:                   tid,
 		})
 		if err != nil {
-			return nil, errors.Wrap(err, "adding team target")
+			return nil, ctxerr.Wrap(ctx, err, "adding team target")
 		}
 	}
 
-	hostIDs, err := svc.ds.HostIDsInTargets(filter, targets)
+	hostIDs, err := svc.ds.HostIDsInTargets(ctx, filter, targets)
 	if err != nil {
-		return nil, errors.Wrap(err, "get target IDs")
+		return nil, ctxerr.Wrap(ctx, err, "get target IDs")
 	}
 
 	err = svc.liveQueryStore.RunQuery(strconv.Itoa(int(campaign.ID)), queryString, hostIDs)
 	if err != nil {
-		return nil, errors.Wrap(err, "run query")
+		return nil, ctxerr.Wrap(ctx, err, "run query")
 	}
 
-	campaign.Metrics, err = svc.ds.CountHostsInTargets(filter, targets, time.Now())
+	campaign.Metrics, err = svc.ds.CountHostsInTargets(ctx, filter, targets, time.Now())
 	if err != nil {
-		return nil, errors.Wrap(err, "counting hosts")
+		return nil, ctxerr.Wrap(ctx, err, "counting hosts")
 	}
 
 	if err := svc.ds.NewActivity(
+		ctx,
 		authz.UserFromContext(ctx),
 		fleet.ActivityTypeLiveQuery,
 		&map[string]interface{}{"targets_count": campaign.Metrics.TotalHosts},
@@ -202,7 +203,7 @@ func (svc Service) StreamCampaignResults(ctx context.Context, conn *websocket.Co
 	}
 
 	// Find the campaign and ensure it is active
-	campaign, err := svc.ds.DistributedQueryCampaign(campaignID)
+	campaign, err := svc.ds.DistributedQueryCampaign(ctx, campaignID)
 	if err != nil {
 		conn.WriteJSONError(fmt.Sprintf("cannot find campaign for ID %d", campaignID))
 		return
@@ -221,31 +222,17 @@ func (svc Service) StreamCampaignResults(ctx context.Context, conn *websocket.Co
 
 	// Open the channel from which we will receive incoming query results
 	// (probably from the redis pubsub implementation)
-	cancelCtx, cancelFunc := context.WithCancel(ctx)
-	defer cancelFunc()
-
-	readChan, err := svc.resultStore.ReadChannel(cancelCtx, *campaign)
+	readChan, cancelFunc, err := svc.GetCampaignReader(ctx, campaign)
 	if err != nil {
-		conn.WriteJSONError(fmt.Sprintf("cannot open read channel for campaign %d ", campaignID))
+		conn.WriteJSONError("error getting campaign reader: " + err.Error())
 		return
 	}
-
-	// Setting status to running will cause the query to be returned to the
-	// targets when they check in for their queries
-	campaign.Status = fleet.QueryRunning
-	if err := svc.ds.SaveDistributedQueryCampaign(campaign); err != nil {
-		conn.WriteJSONError("error saving campaign state")
-		return
-	}
+	defer cancelFunc()
 
 	// Setting the status to completed stops the query from being sent to
 	// targets. If this fails, there is a background job that will clean up
 	// this campaign.
-	defer func() {
-		campaign.Status = fleet.QueryComplete
-		_ = svc.ds.SaveDistributedQueryCampaign(campaign)
-		_ = svc.liveQueryStore.StopQuery(strconv.Itoa(int(campaign.ID)))
-	}()
+	defer svc.CompleteCampaign(ctx, campaign)
 
 	status := campaignStatus{
 		Status: campaignStatusPending,
@@ -268,7 +255,7 @@ func (svc Service) StreamCampaignResults(ctx context.Context, conn *websocket.Co
 		res.Rows = filteredRows
 	}
 
-	targets, err := svc.ds.DistributedQueryCampaignTargetIDs(campaign.ID)
+	targets, err := svc.ds.DistributedQueryCampaignTargetIDs(ctx, campaign.ID)
 	if err != nil {
 		conn.WriteJSONError("error retrieving campaign targets: " + err.Error())
 		return
@@ -278,9 +265,9 @@ func (svc Service) StreamCampaignResults(ctx context.Context, conn *websocket.Co
 		metrics, err := svc.CountHostsInTargets(ctx, &campaign.QueryID, *targets)
 		if err != nil {
 			if err = conn.WriteJSONError("error retrieving target counts"); err != nil {
-				return errors.Wrap(err, "retrieve target counts, write failed")
+				return ctxerr.Wrap(ctx, err, "retrieve target counts, write failed")
 			}
-			return errors.Wrap(err, "retrieve target counts")
+			return ctxerr.Wrap(ctx, err, "retrieve target counts")
 		}
 
 		totals := targetTotals{
@@ -292,7 +279,7 @@ func (svc Service) StreamCampaignResults(ctx context.Context, conn *websocket.Co
 		if lastTotals != totals {
 			lastTotals = totals
 			if err = conn.WriteJSONMessage("totals", totals); err != nil {
-				return errors.Wrap(err, "write totals")
+				return ctxerr.Wrap(ctx, err, "write totals")
 			}
 		}
 
@@ -304,7 +291,7 @@ func (svc Service) StreamCampaignResults(ctx context.Context, conn *websocket.Co
 		if lastStatus != status {
 			lastStatus = status
 			if err = conn.WriteJSONMessage("status", status); err != nil {
-				return errors.Wrap(err, "write status")
+				return ctxerr.Wrap(ctx, err, "write status")
 			}
 		}
 
@@ -331,7 +318,7 @@ func (svc Service) StreamCampaignResults(ctx context.Context, conn *websocket.Co
 			case fleet.DistributedQueryResult:
 				mapHostnameRows(&res)
 				err = conn.WriteJSONMessage("result", res)
-				if errors.Cause(err) == sockjs.ErrSessionNotOpen {
+				if ctxerr.Cause(err) == sockjs.ErrSessionNotOpen {
 					// return and stop sending the query if the session was closed
 					// by the client
 					return

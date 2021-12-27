@@ -1,22 +1,5 @@
 package fleet
 
-import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-
-	"github.com/pkg/errors"
-)
-
-type SoftwareStore interface {
-	SaveHostSoftware(host *Host) error
-	LoadHostSoftware(host *Host) error
-	AllSoftwareWithoutCPEIterator() (SoftwareIterator, error)
-	AddCPEForSoftware(software Software, cpe string) error
-	AllCPEs() ([]string, error)
-	InsertCVEForCPE(cve string, cpes []string) error
-}
-
 type SoftwareCVE struct {
 	CVE         string `json:"cve" db:"cve"`
 	DetailsLink string `json:"details_link" db:"details_link"`
@@ -29,6 +12,8 @@ type Software struct {
 	Name string `json:"name" db:"name"`
 	// Version is reported version.
 	Version string `json:"version" db:"version"`
+	// BundleIdentifier is the CFBundleIdentifier label from the info properties
+	BundleIdentifier string `json:"bundle_identifier,omitempty" db:"bundle_identifier"`
 	// Source is the source of the data (osquery table name).
 	Source string `json:"source" db:"source"`
 
@@ -38,33 +23,11 @@ type Software struct {
 	Vulnerabilities VulnerabilitiesSlice `json:"vulnerabilities"`
 }
 
-type VulnerabilitiesSlice []SoftwareCVE
-
-func (v *VulnerabilitiesSlice) Scan(src interface{}) error {
-	if src == nil {
-		return nil
-	}
-	switch typed := src.(type) {
-	case []byte:
-		// MariaDB 10.5.4 compat fixes: first case is that the IF() doesn't seem to work as expected, so it returns
-		// the following as the null value
-		if bytes.Equal(typed, []byte(`{"cve": null, "details_link": null}`)) {
-			return nil
-		}
-		// MariaDB 10.5.4 compat fixes: second case JSON_ARRAYAGG is not very nice in this version, so when there's
-		// only one item in the array, it figures "you only need the one item in this case! here you go!". So we patch
-		// the object by making it an array
-		if len(typed) > 0 && typed[0] == '{' {
-			typed = []byte(fmt.Sprintf("[%s]", string(typed)))
-		}
-
-		err := json.Unmarshal(typed, v)
-		if err != nil {
-			return errors.Wrapf(err, "src=%s", string(typed))
-		}
-	}
-	return nil
+func (Software) AuthzType() string {
+	return "software"
 }
+
+type VulnerabilitiesSlice []SoftwareCVE
 
 // HostSoftware is the set of software installed on a specific host
 type HostSoftware struct {
@@ -82,4 +45,13 @@ type SoftwareIterator interface {
 	Value() (*Software, error)
 	Err() error
 	Close() error
+}
+
+type SoftwareListOptions struct {
+	ListOptions
+
+	TeamID         *uint `query:"team_id,optional"`
+	VulnerableOnly bool  `query:"vulnerable,optional"`
+
+	SkipLoadingCVEs bool
 }

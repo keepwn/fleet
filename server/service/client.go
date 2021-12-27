@@ -2,9 +2,11 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -14,7 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
+	"github.com/fleetdm/fleet/v4/pkg/fleethttp"
+	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
+	"github.com/fleetdm/fleet/v4/server/fleet"
 )
 
 // httpClient interface allows the HTTP methods to be mocked.
@@ -29,6 +33,8 @@ type Client struct {
 	token              string
 	http               httpClient
 	insecureSkipVerify bool
+
+	writer io.Writer
 }
 
 type ClientOption func(*Client) error
@@ -38,7 +44,7 @@ func NewClient(addr string, insecureSkipVerify bool, rootCA, urlPrefix string, o
 	// API breaking change, needs a major version release
 	baseURL, err := url.Parse(addr)
 	if err != nil {
-		return nil, errors.Wrap(err, "parsing URL")
+		return nil, fmt.Errorf("parsing URL: %w", err)
 	}
 
 	if baseURL.Scheme != "https" && !strings.Contains(baseURL.Host, "localhost") && !strings.Contains(baseURL.Host, "127.0.0.1") {
@@ -50,29 +56,25 @@ func NewClient(addr string, insecureSkipVerify bool, rootCA, urlPrefix string, o
 		// read in the root cert file specified in the context
 		certs, err := ioutil.ReadFile(rootCA)
 		if err != nil {
-			return nil, errors.Wrap(err, "reading root CA")
+			return nil, fmt.Errorf("reading root CA: %w", err)
 		}
 
 		// add certs to pool
 		if ok := rootCAPool.AppendCertsFromPEM(certs); !ok {
-			return nil, errors.Wrap(err, "adding root CA")
+			return nil, errors.New("failed to add certificates to root CA pool")
 		}
 	} else if !insecureSkipVerify {
 		// Use only the system certs (doesn't work on Windows)
 		rootCAPool, err = x509.SystemCertPool()
 		if err != nil {
-			return nil, errors.Wrap(err, "loading system cert pool")
+			return nil, fmt.Errorf("loading system cert pool: %w", err)
 		}
 	}
 
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: insecureSkipVerify,
-				RootCAs:            rootCAPool,
-			},
-		},
-	}
+	httpClient := fleethttp.NewClient(fleethttp.WithTLSClientConfig(&tls.Config{
+		InsecureSkipVerify: insecureSkipVerify,
+		RootCAs:            rootCAPool,
+	}))
 
 	client := &Client{
 		addr:               addr,
@@ -104,38 +106,59 @@ func EnableClientDebug() ClientOption {
 	}
 }
 
-func (c *Client) doWithHeaders(verb, path, rawQuery string, params interface{}, headers map[string]string) (*http.Response, error) {
+func SetClientWriter(w io.Writer) ClientOption {
+	return func(c *Client) error {
+		c.writer = w
+		return nil
+	}
+}
+
+func (c *Client) doContextWithHeaders(ctx context.Context, verb, path, rawQuery string, params interface{}, headers map[string]string) (*http.Response, error) {
 	var bodyBytes []byte
 	var err error
 	if params != nil {
 		bodyBytes, err = json.Marshal(params)
 		if err != nil {
-			return nil, errors.Wrap(err, "marshaling json")
+			return nil, ctxerr.Wrap(ctx, err, "marshaling json")
 		}
 	}
 
-	request, err := http.NewRequest(
+	request, err := http.NewRequestWithContext(
+		ctx,
 		verb,
 		c.url(path, rawQuery).String(),
 		bytes.NewBuffer(bodyBytes),
 	)
 	if err != nil {
-		return nil, errors.Wrap(err, "creating request object")
+		return nil, ctxerr.Wrap(ctx, err, "creating request object")
 	}
 	for k, v := range headers {
 		request.Header.Set(k, v)
 	}
 
-	return c.http.Do(request)
+	resp, err := c.http.Do(request)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "do request")
+	}
+
+	if resp.Header.Get(fleet.HeaderLicenseKey) == fleet.HeaderLicenseValueExpired {
+		fleet.WriteExpiredLicenseBanner(c.writer)
+	}
+
+	return resp, nil
 }
 
 func (c *Client) Do(verb, path, rawQuery string, params interface{}) (*http.Response, error) {
+	return c.DoContext(context.Background(), verb, path, rawQuery, params)
+}
+
+func (c *Client) DoContext(ctx context.Context, verb, path, rawQuery string, params interface{}) (*http.Response, error) {
 	headers := map[string]string{
 		"Content-type": "application/json",
 		"Accept":       "application/json",
 	}
 
-	return c.doWithHeaders(verb, path, rawQuery, params, headers)
+	return c.doContextWithHeaders(ctx, verb, path, rawQuery, params, headers)
 }
 
 func (c *Client) AuthenticatedDo(verb, path, rawQuery string, params interface{}) (*http.Response, error) {
@@ -149,7 +172,7 @@ func (c *Client) AuthenticatedDo(verb, path, rawQuery string, params interface{}
 		"Authorization": fmt.Sprintf("Bearer %s", c.token),
 	}
 
-	return c.doWithHeaders(verb, path, rawQuery, params, headers)
+	return c.doContextWithHeaders(context.Background(), verb, path, rawQuery, params, headers)
 }
 
 func (c *Client) SetToken(t string) {
@@ -205,20 +228,20 @@ func (l *logRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 		fmt.Fprintf(os.Stderr, "Read body error: %v", err)
 		return nil, err
 	}
-	res.Body = ioutil.NopCloser(resBody)
+	res.Body = io.NopCloser(resBody)
 
 	return res, nil
 }
 
-func (c *Client) authenticatedRequest(params interface{}, verb string, path string, responseDest interface{}) error {
-	response, err := c.AuthenticatedDo(verb, path, "", params)
+func (c *Client) authenticatedRequestWithQuery(params interface{}, verb string, path string, responseDest interface{}, query string) error {
+	response, err := c.AuthenticatedDo(verb, path, query, params)
 	if err != nil {
-		return errors.Wrapf(err, "%s %s", verb, path)
+		return fmt.Errorf("%s %s: %w", verb, path, err)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		return errors.Errorf(
+		return fmt.Errorf(
 			"%s %s received status %d %s",
 			verb, path,
 			response.StatusCode,
@@ -228,14 +251,18 @@ func (c *Client) authenticatedRequest(params interface{}, verb string, path stri
 
 	err = json.NewDecoder(response.Body).Decode(&responseDest)
 	if err != nil {
-		return errors.Wrapf(err, "decode %s %s response", verb, path)
+		return fmt.Errorf("decode %s %s response: %w", verb, path, err)
 	}
 
 	if e, ok := responseDest.(errorer); ok {
 		if e.error() != nil {
-			return errors.Errorf("%s %s error: %s", verb, path, e.error())
+			return fmt.Errorf("%s %s error: %s", verb, path, e.error())
 		}
 	}
 
 	return nil
+}
+
+func (c *Client) authenticatedRequest(params interface{}, verb string, path string, responseDest interface{}) error {
+	return c.authenticatedRequestWithQuery(params, verb, path, responseDest, "")
 }

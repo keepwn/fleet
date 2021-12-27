@@ -31,8 +31,6 @@ export default (WrappedComponent, { fields, validate = defaultValidate }) => {
         errors: {},
         formData,
       };
-
-      return false;
     }
 
     componentWillMount() {
@@ -134,8 +132,19 @@ export default (WrappedComponent, { fields, validate = defaultValidate }) => {
       return this.state.formData[fieldName];
     };
 
+    resetField = (fieldName) => {
+      const { errors, formData } = this.state;
+
+      this.setState({
+        errors: { ...errors, base: null, [fieldName]: null },
+        formData: { ...formData, [fieldName]: undefined },
+      });
+
+      return false;
+    };
+
     render() {
-      const { getFields, onSubmit, props } = this;
+      const { getFields, onSubmit, resetField, props } = this;
       const { errors } = this.state;
 
       return (
@@ -144,6 +153,7 @@ export default (WrappedComponent, { fields, validate = defaultValidate }) => {
           baseError={errors.base}
           fields={getFields()}
           handleSubmit={onSubmit}
+          resetField={resetField}
         />
       );
     }

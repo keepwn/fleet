@@ -1,9 +1,9 @@
-// package packaging provides tools for buildin Orbit installation packages.
+// Package packaging provides tools for building Orbit installation packages.
 package packaging
 
 import (
-	"io"
-	"io/fs"
+	_ "embed"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -11,8 +11,8 @@ import (
 	"github.com/fleetdm/fleet/v4/orbit/pkg/constant"
 	"github.com/fleetdm/fleet/v4/orbit/pkg/update"
 	"github.com/fleetdm/fleet/v4/orbit/pkg/update/filestore"
-	"github.com/fleetdm/fleet/v4/secure"
-	"github.com/pkg/errors"
+	"github.com/fleetdm/fleet/v4/pkg/file"
+	"github.com/fleetdm/fleet/v4/pkg/secure"
 	"github.com/rs/zerolog/log"
 )
 
@@ -46,60 +46,51 @@ type Options struct {
 	UpdateURL string
 	// UpdateRoots is the root JSON metadata for update server (TUF repository).
 	UpdateRoots string
+	// OsqueryFlagfile is the (optional) path to a flagfile to provide to osquery.
+	OsqueryFlagfile string
 	// Debug determines whether to enable debug logging for the agent.
 	Debug bool
 }
 
-func copyFile(srcPath, dstPath string, perm os.FileMode) error {
-	src, err := os.Open(srcPath)
+func initializeTempDir() (string, error) {
+	// Initialize directories
+	tmpDir, err := ioutil.TempDir("", "orbit-package")
 	if err != nil {
-		return errors.Wrap(err, "open src for copy")
-	}
-	defer src.Close()
-
-	if err := secure.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
-		return errors.Wrap(err, "create dst dir for copy")
+		return "", fmt.Errorf("failed to create temp dir: %w", err)
 	}
 
-	dst, err := secure.OpenFile(dstPath, os.O_RDWR|os.O_CREATE, perm)
-	if err != nil {
-		return errors.Wrap(err, "open dst for copy")
+	if err := os.Chmod(tmpDir, 0755); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return "", fmt.Errorf("change temp directory permissions: %w", err)
 	}
-	defer dst.Close()
+	log.Debug().Str("path", tmpDir).Msg("created temp directory")
 
-	if _, err := io.Copy(dst, src); err != nil {
-		return errors.Wrap(err, "copy src to dst")
-	}
-	if err := dst.Sync(); err != nil {
-		return errors.Wrap(err, "sync dst after copy")
-	}
-
-	return nil
+	return tmpDir, nil
 }
 
-func initializeUpdates(updateOpt update.Options) error {
+func InitializeUpdates(updateOpt update.Options) error {
 	localStore, err := filestore.New(filepath.Join(updateOpt.RootDirectory, "tuf-metadata.json"))
 	if err != nil {
-		return errors.Wrap(err, "failed to create local metadata store")
+		return fmt.Errorf("failed to create local metadata store: %w", err)
 	}
 	updateOpt.LocalStore = localStore
 
 	updater, err := update.New(updateOpt)
 	if err != nil {
-		return errors.Wrap(err, "failed to init updater")
+		return fmt.Errorf("failed to init updater: %w", err)
 	}
 	if err := updater.UpdateMetadata(); err != nil {
-		return errors.Wrap(err, "failed to update metadata")
+		return fmt.Errorf("failed to update metadata: %w", err)
 	}
 	osquerydPath, err := updater.Get("osqueryd", updateOpt.OsquerydChannel)
 	if err != nil {
-		return errors.Wrap(err, "failed to get osqueryd")
+		return fmt.Errorf("failed to get osqueryd: %w", err)
 	}
 	log.Debug().Str("path", osquerydPath).Msg("got osqueryd")
 
 	orbitPath, err := updater.Get("orbit", updateOpt.OrbitChannel)
 	if err != nil {
-		return errors.Wrap(err, "failed to get orbit")
+		return fmt.Errorf("failed to get orbit: %w", err)
 	}
 	log.Debug().Str("path", orbitPath).Msg("got orbit")
 
@@ -110,26 +101,46 @@ func writeSecret(opt Options, orbitRoot string) error {
 	// Enroll secret
 	path := filepath.Join(orbitRoot, "secret.txt")
 	if err := secure.MkdirAll(filepath.Dir(path), constant.DefaultDirMode); err != nil {
-		return errors.Wrap(err, "mkdir")
+		return fmt.Errorf("mkdir: %w", err)
 	}
 
 	if err := ioutil.WriteFile(path, []byte(opt.EnrollSecret), 0600); err != nil {
-		return errors.Wrap(err, "write file")
+		return fmt.Errorf("write file: %w", err)
 	}
 
 	return nil
 }
 
-func chmodRecursive(path string, perm os.FileMode) error {
-	return filepath.Walk(path, func(path string, info fs.FileInfo, err error) error {
-		if err != nil {
-			return errors.Wrap(err, "walk error")
-		}
+func writeOsqueryFlagfile(opt Options, orbitRoot string) error {
+	dstPath := filepath.Join(orbitRoot, "osquery.flags")
 
-		if err := os.Chmod(path, perm); err != nil {
-			return errors.Wrap(err, "chmod")
+	if opt.OsqueryFlagfile == "" {
+		// Write empty flagfile
+		if err := os.WriteFile(dstPath, []byte(""), constant.DefaultFileMode); err != nil {
+			return fmt.Errorf("write empty flagfile: %w", err)
 		}
 
 		return nil
-	})
+	}
+
+	if err := file.Copy(opt.OsqueryFlagfile, dstPath, constant.DefaultFileMode); err != nil {
+		return fmt.Errorf("copy flagfile: %w", err)
+	}
+
+	return nil
+}
+
+// Embed the certs file that osquery uses so that we can drop it into our installation packages.
+// This file copied from https://raw.githubusercontent.com/osquery/osquery/master/tools/deployment/certs.pem
+//go:embed certs.pem
+var osqueryCerts []byte
+
+func writeOsqueryCertPEM(opt Options, orbitRoot string) error {
+	dstPath := filepath.Join(orbitRoot, "certs.pem")
+
+	if err := ioutil.WriteFile(dstPath, osqueryCerts, 0644); err != nil {
+		return fmt.Errorf("write file: %w", err)
+	}
+
+	return nil
 }

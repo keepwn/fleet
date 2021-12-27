@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -61,7 +62,6 @@ type FleetEndpoints struct {
 	CreateDistributedQueryCampaignByNames endpoint.Endpoint
 	CreatePack                            endpoint.Endpoint
 	ModifyPack                            endpoint.Endpoint
-	GetPack                               endpoint.Endpoint
 	ListPacks                             endpoint.Endpoint
 	DeletePack                            endpoint.Endpoint
 	DeletePackByID                        endpoint.Endpoint
@@ -94,12 +94,9 @@ type FleetEndpoints struct {
 	ApplyLabelSpecs                       endpoint.Endpoint
 	GetLabelSpecs                         endpoint.Endpoint
 	GetLabelSpec                          endpoint.Endpoint
-	GetHost                               endpoint.Endpoint
 	HostByIdentifier                      endpoint.Endpoint
 	DeleteHost                            endpoint.Endpoint
 	RefetchHost                           endpoint.Endpoint
-	ListHosts                             endpoint.Endpoint
-	GetHostSummary                        endpoint.Endpoint
 	AddHostsToTeam                        endpoint.Endpoint
 	AddHostsToTeamByFilter                endpoint.Endpoint
 	SearchTargets                         endpoint.Endpoint
@@ -110,9 +107,6 @@ type FleetEndpoints struct {
 	SSOSettings                           endpoint.Endpoint
 	StatusResultStore                     endpoint.Endpoint
 	StatusLiveQuery                       endpoint.Endpoint
-	ListCarves                            endpoint.Endpoint
-	GetCarve                              endpoint.Endpoint
-	GetCarveBlock                         endpoint.Endpoint
 	Version                               endpoint.Endpoint
 	CreateTeam                            endpoint.Endpoint
 	ModifyTeam                            endpoint.Endpoint
@@ -123,11 +117,10 @@ type FleetEndpoints struct {
 	AddTeamUsers                          endpoint.Endpoint
 	DeleteTeamUsers                       endpoint.Endpoint
 	TeamEnrollSecrets                     endpoint.Endpoint
-	ListActivities                        endpoint.Endpoint
 }
 
 // MakeFleetServerEndpoints creates the Fleet API endpoints.
-func MakeFleetServerEndpoints(svc fleet.Service, urlPrefix string, limitStore throttled.GCRAStore) FleetEndpoints {
+func MakeFleetServerEndpoints(svc fleet.Service, urlPrefix string, limitStore throttled.GCRAStore, logger kitlog.Logger) FleetEndpoints {
 	limiter := ratelimit.NewMiddleware(limitStore)
 
 	return FleetEndpoints{
@@ -135,21 +128,21 @@ func MakeFleetServerEndpoints(svc fleet.Service, urlPrefix string, limitStore th
 			throttled.RateQuota{MaxRate: throttled.PerMin(10), MaxBurst: 9})(
 			makeLoginEndpoint(svc),
 		),
-		Logout: makeLogoutEndpoint(svc),
+		Logout: logged(makeLogoutEndpoint(svc)),
 		ForgotPassword: limiter.Limit(
 			throttled.RateQuota{MaxRate: throttled.PerHour(10), MaxBurst: 9})(
-			makeForgotPasswordEndpoint(svc),
+			logged(makeForgotPasswordEndpoint(svc)),
 		),
-		ResetPassword:        makeResetPasswordEndpoint(svc),
-		CreateUserWithInvite: makeCreateUserFromInviteEndpoint(svc),
-		VerifyInvite:         makeVerifyInviteEndpoint(svc),
-		InitiateSSO:          makeInitiateSSOEndpoint(svc),
-		CallbackSSO:          makeCallbackSSOEndpoint(svc, urlPrefix),
-		SSOSettings:          makeSSOSettingsEndpoint(svc),
+		ResetPassword:        logged(makeResetPasswordEndpoint(svc)),
+		CreateUserWithInvite: logged(makeCreateUserFromInviteEndpoint(svc)),
+		VerifyInvite:         logged(makeVerifyInviteEndpoint(svc)),
+		InitiateSSO:          logged(makeInitiateSSOEndpoint(svc)),
+		CallbackSSO:          logged(makeCallbackSSOEndpoint(svc, urlPrefix)),
+		SSOSettings:          logged(makeSSOSettingsEndpoint(svc)),
 
 		// PerformRequiredPasswordReset needs only to authenticate the
 		// logged in user
-		PerformRequiredPasswordReset: canPerformPasswordReset(makePerformRequiredPasswordResetEndpoint(svc)),
+		PerformRequiredPasswordReset: logged(canPerformPasswordReset(makePerformRequiredPasswordResetEndpoint(svc))),
 
 		// Standard user authentication routes
 		Me:                                    authenticatedUser(svc, makeGetSessionUserEndpoint(svc)),
@@ -185,7 +178,6 @@ func MakeFleetServerEndpoints(svc fleet.Service, urlPrefix string, limitStore th
 		CreateDistributedQueryCampaignByNames: authenticatedUser(svc, makeCreateDistributedQueryCampaignByNamesEndpoint(svc)),
 		CreatePack:                            authenticatedUser(svc, makeCreatePackEndpoint(svc)),
 		ModifyPack:                            authenticatedUser(svc, makeModifyPackEndpoint(svc)),
-		GetPack:                               authenticatedUser(svc, makeGetPackEndpoint(svc)),
 		ListPacks:                             authenticatedUser(svc, makeListPacksEndpoint(svc)),
 		DeletePack:                            authenticatedUser(svc, makeDeletePackEndpoint(svc)),
 		DeletePackByID:                        authenticatedUser(svc, makeDeletePackByIDEndpoint(svc)),
@@ -201,10 +193,7 @@ func MakeFleetServerEndpoints(svc fleet.Service, urlPrefix string, limitStore th
 		GetGlobalSchedule:                     authenticatedUser(svc, makeGetGlobalScheduleEndpoint(svc)),
 		ModifyGlobalSchedule:                  authenticatedUser(svc, makeModifyGlobalScheduleEndpoint(svc)),
 		DeleteGlobalSchedule:                  authenticatedUser(svc, makeDeleteGlobalScheduleEndpoint(svc)),
-		GetHost:                               authenticatedUser(svc, makeGetHostEndpoint(svc)),
 		HostByIdentifier:                      authenticatedUser(svc, makeHostByIdentifierEndpoint(svc)),
-		ListHosts:                             authenticatedUser(svc, makeListHostsEndpoint(svc)),
-		GetHostSummary:                        authenticatedUser(svc, makeGetHostSummaryEndpoint(svc)),
 		DeleteHost:                            authenticatedUser(svc, makeDeleteHostEndpoint(svc)),
 		AddHostsToTeam:                        authenticatedUser(svc, makeAddHostsToTeamEndpoint(svc)),
 		AddHostsToTeamByFilter:                authenticatedUser(svc, makeAddHostsToTeamByFilterEndpoint(svc)),
@@ -222,9 +211,6 @@ func MakeFleetServerEndpoints(svc fleet.Service, urlPrefix string, limitStore th
 		SearchTargets:                         authenticatedUser(svc, makeSearchTargetsEndpoint(svc)),
 		GetCertificate:                        authenticatedUser(svc, makeCertificateEndpoint(svc)),
 		ChangeEmail:                           authenticatedUser(svc, makeChangeEmailEndpoint(svc)),
-		ListCarves:                            authenticatedUser(svc, makeListCarvesEndpoint(svc)),
-		GetCarve:                              authenticatedUser(svc, makeGetCarveEndpoint(svc)),
-		GetCarveBlock:                         authenticatedUser(svc, makeGetCarveBlockEndpoint(svc)),
 		Version:                               authenticatedUser(svc, makeVersionEndpoint(svc)),
 		CreateTeam:                            authenticatedUser(svc, makeCreateTeamEndpoint(svc)),
 		ModifyTeam:                            authenticatedUser(svc, makeModifyTeamEndpoint(svc)),
@@ -235,24 +221,23 @@ func MakeFleetServerEndpoints(svc fleet.Service, urlPrefix string, limitStore th
 		AddTeamUsers:                          authenticatedUser(svc, makeAddTeamUsersEndpoint(svc)),
 		DeleteTeamUsers:                       authenticatedUser(svc, makeDeleteTeamUsersEndpoint(svc)),
 		TeamEnrollSecrets:                     authenticatedUser(svc, makeTeamEnrollSecretsEndpoint(svc)),
-		ListActivities:                        authenticatedUser(svc, makeListActivitiesEndpoint(svc)),
 
 		// Authenticated status endpoints
 		StatusResultStore: authenticatedUser(svc, makeStatusResultStoreEndpoint(svc)),
 		StatusLiveQuery:   authenticatedUser(svc, makeStatusLiveQueryEndpoint(svc)),
 
 		// Osquery endpoints
-		EnrollAgent: makeEnrollAgentEndpoint(svc),
+		EnrollAgent: logged(makeEnrollAgentEndpoint(svc)),
 		// Authenticated osquery endpoints
-		GetClientConfig:               authenticatedHost(svc, makeGetClientConfigEndpoint(svc)),
-		GetDistributedQueries:         authenticatedHost(svc, makeGetDistributedQueriesEndpoint(svc)),
-		SubmitDistributedQueryResults: authenticatedHost(svc, makeSubmitDistributedQueryResultsEndpoint(svc)),
-		SubmitLogs:                    authenticatedHost(svc, makeSubmitLogsEndpoint(svc)),
-		CarveBegin:                    authenticatedHost(svc, makeCarveBeginEndpoint(svc)),
+		GetClientConfig:               authenticatedHost(svc, logger, makeGetClientConfigEndpoint(svc)),
+		GetDistributedQueries:         authenticatedHost(svc, logger, makeGetDistributedQueriesEndpoint(svc)),
+		SubmitDistributedQueryResults: authenticatedHost(svc, logger, makeSubmitDistributedQueryResultsEndpoint(svc)),
+		SubmitLogs:                    authenticatedHost(svc, logger, makeSubmitLogsEndpoint(svc)),
+		CarveBegin:                    authenticatedHost(svc, logger, makeCarveBeginEndpoint(svc)),
 		// For some reason osquery does not provide a node key with the block
 		// data. Instead the carve session ID should be verified in the service
 		// method.
-		CarveBlock: makeCarveBlockEndpoint(svc),
+		CarveBlock: logged(makeCarveBlockEndpoint(svc)),
 	}
 }
 
@@ -297,7 +282,6 @@ type fleetHandlers struct {
 	CreateDistributedQueryCampaignByNames http.Handler
 	CreatePack                            http.Handler
 	ModifyPack                            http.Handler
-	GetPack                               http.Handler
 	ListPacks                             http.Handler
 	DeletePack                            http.Handler
 	DeletePackByID                        http.Handler
@@ -330,12 +314,9 @@ type fleetHandlers struct {
 	ApplyLabelSpecs                       http.Handler
 	GetLabelSpecs                         http.Handler
 	GetLabelSpec                          http.Handler
-	GetHost                               http.Handler
 	HostByIdentifier                      http.Handler
 	DeleteHost                            http.Handler
 	RefetchHost                           http.Handler
-	ListHosts                             http.Handler
-	GetHostSummary                        http.Handler
 	AddHostsToTeam                        http.Handler
 	AddHostsToTeamByFilter                http.Handler
 	SearchTargets                         http.Handler
@@ -346,9 +327,6 @@ type fleetHandlers struct {
 	SettingsSSO                           http.Handler
 	StatusResultStore                     http.Handler
 	StatusLiveQuery                       http.Handler
-	ListCarves                            http.Handler
-	GetCarve                              http.Handler
-	GetCarveBlock                         http.Handler
 	Version                               http.Handler
 	CreateTeam                            http.Handler
 	ModifyTeam                            http.Handler
@@ -359,7 +337,6 @@ type fleetHandlers struct {
 	AddTeamUsers                          http.Handler
 	DeleteTeamUsers                       http.Handler
 	TeamEnrollSecrets                     http.Handler
-	ListActivities                        http.Handler
 }
 
 func makeKitHandlers(e FleetEndpoints, opts []kithttp.ServerOption) *fleetHandlers {
@@ -408,7 +385,6 @@ func makeKitHandlers(e FleetEndpoints, opts []kithttp.ServerOption) *fleetHandle
 		CreateDistributedQueryCampaignByNames: newServer(e.CreateDistributedQueryCampaignByNames, decodeCreateDistributedQueryCampaignByNamesRequest),
 		CreatePack:                            newServer(e.CreatePack, decodeCreatePackRequest),
 		ModifyPack:                            newServer(e.ModifyPack, decodeModifyPackRequest),
-		GetPack:                               newServer(e.GetPack, decodeGetPackRequest),
 		ListPacks:                             newServer(e.ListPacks, decodeListPacksRequest),
 		DeletePack:                            newServer(e.DeletePack, decodeDeletePackRequest),
 		DeletePackByID:                        newServer(e.DeletePackByID, decodeDeletePackByIDRequest),
@@ -441,12 +417,9 @@ func makeKitHandlers(e FleetEndpoints, opts []kithttp.ServerOption) *fleetHandle
 		ApplyLabelSpecs:                       newServer(e.ApplyLabelSpecs, decodeApplyLabelSpecsRequest),
 		GetLabelSpecs:                         newServer(e.GetLabelSpecs, decodeNoParamsRequest),
 		GetLabelSpec:                          newServer(e.GetLabelSpec, decodeGetGenericSpecRequest),
-		GetHost:                               newServer(e.GetHost, decodeGetHostRequest),
 		HostByIdentifier:                      newServer(e.HostByIdentifier, decodeHostByIdentifierRequest),
 		DeleteHost:                            newServer(e.DeleteHost, decodeDeleteHostRequest),
 		RefetchHost:                           newServer(e.RefetchHost, decodeRefetchHostRequest),
-		ListHosts:                             newServer(e.ListHosts, decodeListHostsRequest),
-		GetHostSummary:                        newServer(e.GetHostSummary, decodeNoParamsRequest),
 		AddHostsToTeam:                        newServer(e.AddHostsToTeam, decodeAddHostsToTeamRequest),
 		AddHostsToTeamByFilter:                newServer(e.AddHostsToTeamByFilter, decodeAddHostsToTeamByFilterRequest),
 		SearchTargets:                         newServer(e.SearchTargets, decodeSearchTargetsRequest),
@@ -457,9 +430,6 @@ func makeKitHandlers(e FleetEndpoints, opts []kithttp.ServerOption) *fleetHandle
 		SettingsSSO:                           newServer(e.SSOSettings, decodeNoParamsRequest),
 		StatusResultStore:                     newServer(e.StatusResultStore, decodeNoParamsRequest),
 		StatusLiveQuery:                       newServer(e.StatusLiveQuery, decodeNoParamsRequest),
-		ListCarves:                            newServer(e.ListCarves, decodeListCarvesRequest),
-		GetCarve:                              newServer(e.GetCarve, decodeGetCarveRequest),
-		GetCarveBlock:                         newServer(e.GetCarveBlock, decodeGetCarveBlockRequest),
 		Version:                               newServer(e.Version, decodeNoParamsRequest),
 		CreateTeam:                            newServer(e.CreateTeam, decodeCreateTeamRequest),
 		ModifyTeam:                            newServer(e.ModifyTeam, decodeModifyTeamRequest),
@@ -470,7 +440,6 @@ func makeKitHandlers(e FleetEndpoints, opts []kithttp.ServerOption) *fleetHandle
 		AddTeamUsers:                          newServer(e.AddTeamUsers, decodeModifyTeamUsersRequest),
 		DeleteTeamUsers:                       newServer(e.DeleteTeamUsers, decodeModifyTeamUsersRequest),
 		TeamEnrollSecrets:                     newServer(e.TeamEnrollSecrets, decodeTeamEnrollSecretsRequest),
-		ListActivities:                        newServer(e.ListActivities, decodeListActivitiesRequest),
 	}
 }
 
@@ -483,20 +452,21 @@ func (h *errorHandler) Handle(ctx context.Context, err error) {
 	path, _ := ctx.Value(kithttp.ContextKeyRequestPath).(string)
 	logger := level.Info(kitlog.With(h.logger, "path", path))
 
-	if e, ok := err.(fleet.ErrWithInternal); ok {
-		logger = kitlog.With(logger, "internal", e.Internal())
+	var ewi fleet.ErrWithInternal
+	if errors.As(err, &ewi) {
+		logger = kitlog.With(logger, "internal", ewi.Internal())
 	}
 
-	if e, ok := err.(fleet.ErrWithLogFields); ok {
-		logger = kitlog.With(logger, e.LogFields()...)
+	var ewlf fleet.ErrWithLogFields
+	if errors.As(err, &ewlf) {
+		logger = kitlog.With(logger, ewlf.LogFields()...)
 	}
 
-	switch e := err.(type) {
-	case ratelimit.Error:
-		res := e.Result()
+	var rle ratelimit.Error
+	if errors.As(err, &rle) {
+		res := rle.Result()
 		logger.Log("err", "limit exceeded", "retry_after", res.RetryAfter)
-
-	default:
+	} else {
 		logger.Log("err", err)
 	}
 }
@@ -508,6 +478,19 @@ func logRequestEnd(logger kitlog.Logger) func(context.Context, http.ResponseWrit
 			return ctx
 		}
 		logCtx.Log(ctx, logger)
+		return ctx
+	}
+}
+
+func checkLicenseExpiration(svc fleet.Service) func(context.Context, http.ResponseWriter) context.Context {
+	return func(ctx context.Context, w http.ResponseWriter) context.Context {
+		license, err := svc.License(ctx)
+		if err != nil || license == nil {
+			return ctx
+		}
+		if license.IsPremium() && license.IsExpired() {
+			w.Header().Set(fleet.HeaderLicenseKey, fleet.HeaderLicenseValueExpired)
+		}
 		return ctx
 	}
 }
@@ -524,10 +507,11 @@ func MakeHandler(svc fleet.Service, config config.FleetConfig, logger kitlog.Log
 		kithttp.ServerAfter(
 			kithttp.SetContentType("application/json; charset=utf-8"),
 			logRequestEnd(logger),
+			checkLicenseExpiration(svc),
 		),
 	}
 
-	fleetEndpoints := MakeFleetServerEndpoints(svc, config.Server.URLPrefix, limitStore)
+	fleetEndpoints := MakeFleetServerEndpoints(svc, config.Server.URLPrefix, limitStore, logger)
 	fleetHandlers := makeKitHandlers(fleetEndpoints, fleetAPIOptions)
 
 	r := mux.NewRouter()
@@ -568,15 +552,15 @@ func attachFleetAPIRoutes(r *mux.Router, h *fleetHandlers) {
 	r.Handle("/api/v1/fleet/users", h.ListUsers).Methods("GET").Name("list_users")
 	r.Handle("/api/v1/fleet/users", h.CreateUserWithInvite).Methods("POST").Name("create_user_with_invite")
 	r.Handle("/api/v1/fleet/users/admin", h.CreateUser).Methods("POST").Name("create_user")
-	r.Handle("/api/v1/fleet/users/{id}", h.GetUser).Methods("GET").Name("get_user")
-	r.Handle("/api/v1/fleet/users/{id}", h.ModifyUser).Methods("PATCH").Name("modify_user")
-	r.Handle("/api/v1/fleet/users/{id}", h.DeleteUser).Methods("DELETE").Name("delete_user")
-	r.Handle("/api/v1/fleet/users/{id}/require_password_reset", h.RequirePasswordReset).Methods("POST").Name("require_password_reset")
-	r.Handle("/api/v1/fleet/users/{id}/sessions", h.GetSessionsForUserInfo).Methods("GET").Name("get_session_for_user")
-	r.Handle("/api/v1/fleet/users/{id}/sessions", h.DeleteSessionsForUser).Methods("DELETE").Name("delete_session_for_user")
+	r.Handle("/api/v1/fleet/users/{id:[0-9]+}", h.GetUser).Methods("GET").Name("get_user")
+	r.Handle("/api/v1/fleet/users/{id:[0-9]+}", h.ModifyUser).Methods("PATCH").Name("modify_user")
+	r.Handle("/api/v1/fleet/users/{id:[0-9]+}", h.DeleteUser).Methods("DELETE").Name("delete_user")
+	r.Handle("/api/v1/fleet/users/{id:[0-9]+}/require_password_reset", h.RequirePasswordReset).Methods("POST").Name("require_password_reset")
+	r.Handle("/api/v1/fleet/users/{id:[0-9]+}/sessions", h.GetSessionsForUserInfo).Methods("GET").Name("get_session_for_user")
+	r.Handle("/api/v1/fleet/users/{id:[0-9]+}/sessions", h.DeleteSessionsForUser).Methods("DELETE").Name("delete_session_for_user")
 
-	r.Handle("/api/v1/fleet/sessions/{id}", h.GetSessionInfo).Methods("GET").Name("get_session_info")
-	r.Handle("/api/v1/fleet/sessions/{id}", h.DeleteSession).Methods("DELETE").Name("delete_session")
+	r.Handle("/api/v1/fleet/sessions/{id:[0-9]+}", h.GetSessionInfo).Methods("GET").Name("get_session_info")
+	r.Handle("/api/v1/fleet/sessions/{id:[0-9]+}", h.DeleteSession).Methods("DELETE").Name("delete_session")
 
 	r.Handle("/api/v1/fleet/config/certificate", h.GetCertificate).Methods("GET").Name("get_certificate")
 	r.Handle("/api/v1/fleet/config", h.GetAppConfig).Methods("GET").Name("get_app_config")
@@ -585,17 +569,17 @@ func attachFleetAPIRoutes(r *mux.Router, h *fleetHandlers) {
 	r.Handle("/api/v1/fleet/spec/enroll_secret", h.GetEnrollSecretSpec).Methods("GET").Name("get_enroll_secret_spec")
 	r.Handle("/api/v1/fleet/invites", h.CreateInvite).Methods("POST").Name("create_invite")
 	r.Handle("/api/v1/fleet/invites", h.ListInvites).Methods("GET").Name("list_invites")
-	r.Handle("/api/v1/fleet/invites/{id}", h.DeleteInvite).Methods("DELETE").Name("delete_invite")
+	r.Handle("/api/v1/fleet/invites/{id:[0-9]+}", h.DeleteInvite).Methods("DELETE").Name("delete_invite")
 	r.Handle("/api/v1/fleet/invites/{token}", h.VerifyInvite).Methods("GET").Name("verify_invite")
 
 	r.Handle("/api/v1/fleet/email/change/{token}", h.ChangeEmail).Methods("GET").Name("change_email")
 
-	r.Handle("/api/v1/fleet/queries/{id}", h.GetQuery).Methods("GET").Name("get_query")
+	r.Handle("/api/v1/fleet/queries/{id:[0-9]+}", h.GetQuery).Methods("GET").Name("get_query")
 	r.Handle("/api/v1/fleet/queries", h.ListQueries).Methods("GET").Name("list_queries")
 	r.Handle("/api/v1/fleet/queries", h.CreateQuery).Methods("POST").Name("create_query")
-	r.Handle("/api/v1/fleet/queries/{id}", h.ModifyQuery).Methods("PATCH").Name("modify_query")
+	r.Handle("/api/v1/fleet/queries/{id:[0-9]+}", h.ModifyQuery).Methods("PATCH").Name("modify_query")
 	r.Handle("/api/v1/fleet/queries/{name}", h.DeleteQuery).Methods("DELETE").Name("delete_query")
-	r.Handle("/api/v1/fleet/queries/id/{id}", h.DeleteQueryByID).Methods("DELETE").Name("delete_query_by_id")
+	r.Handle("/api/v1/fleet/queries/id/{id:[0-9]+}", h.DeleteQueryByID).Methods("DELETE").Name("delete_query_by_id")
 	r.Handle("/api/v1/fleet/queries/delete", h.DeleteQueries).Methods("POST").Name("delete_queries")
 	r.Handle("/api/v1/fleet/spec/queries", h.ApplyQuerySpecs).Methods("POST").Name("apply_query_specs")
 	r.Handle("/api/v1/fleet/spec/queries", h.GetQuerySpecs).Methods("GET").Name("get_query_specs")
@@ -604,44 +588,40 @@ func attachFleetAPIRoutes(r *mux.Router, h *fleetHandlers) {
 	r.Handle("/api/v1/fleet/queries/run_by_names", h.CreateDistributedQueryCampaignByNames).Methods("POST").Name("create_distributed_query_campaign_by_names")
 
 	r.Handle("/api/v1/fleet/packs", h.CreatePack).Methods("POST").Name("create_pack")
-	r.Handle("/api/v1/fleet/packs/{id}", h.ModifyPack).Methods("PATCH").Name("modify_pack")
-	r.Handle("/api/v1/fleet/packs/{id}", h.GetPack).Methods("GET").Name("get_pack")
+	r.Handle("/api/v1/fleet/packs/{id:[0-9]+}", h.ModifyPack).Methods("PATCH").Name("modify_pack")
 	r.Handle("/api/v1/fleet/packs", h.ListPacks).Methods("GET").Name("list_packs")
 	r.Handle("/api/v1/fleet/packs/{name}", h.DeletePack).Methods("DELETE").Name("delete_pack")
-	r.Handle("/api/v1/fleet/packs/id/{id}", h.DeletePackByID).Methods("DELETE").Name("delete_pack_by_id")
-	r.Handle("/api/v1/fleet/packs/{id}/scheduled", h.GetScheduledQueriesInPack).Methods("GET").Name("get_scheduled_queries_in_pack")
+	r.Handle("/api/v1/fleet/packs/id/{id:[0-9]+}", h.DeletePackByID).Methods("DELETE").Name("delete_pack_by_id")
+	r.Handle("/api/v1/fleet/packs/{id:[0-9]+}/scheduled", h.GetScheduledQueriesInPack).Methods("GET").Name("get_scheduled_queries_in_pack")
 	r.Handle("/api/v1/fleet/schedule", h.ScheduleQuery).Methods("POST").Name("schedule_query")
-	r.Handle("/api/v1/fleet/schedule/{id}", h.GetScheduledQuery).Methods("GET").Name("get_scheduled_query")
-	r.Handle("/api/v1/fleet/schedule/{id}", h.ModifyScheduledQuery).Methods("PATCH").Name("modify_scheduled_query")
-	r.Handle("/api/v1/fleet/schedule/{id}", h.DeleteScheduledQuery).Methods("DELETE").Name("delete_scheduled_query")
+	r.Handle("/api/v1/fleet/schedule/{id:[0-9]+}", h.GetScheduledQuery).Methods("GET").Name("get_scheduled_query")
+	r.Handle("/api/v1/fleet/schedule/{id:[0-9]+}", h.ModifyScheduledQuery).Methods("PATCH").Name("modify_scheduled_query")
+	r.Handle("/api/v1/fleet/schedule/{id:[0-9]+}", h.DeleteScheduledQuery).Methods("DELETE").Name("delete_scheduled_query")
 	r.Handle("/api/v1/fleet/spec/packs", h.ApplyPackSpecs).Methods("POST").Name("apply_pack_specs")
 	r.Handle("/api/v1/fleet/spec/packs", h.GetPackSpecs).Methods("GET").Name("get_pack_specs")
 	r.Handle("/api/v1/fleet/spec/packs/{name}", h.GetPackSpec).Methods("GET").Name("get_pack_spec")
 
 	r.Handle("/api/v1/fleet/global/schedule", h.GetGlobalSchedule).Methods("GET").Name("set_global_schedule")
 	r.Handle("/api/v1/fleet/global/schedule", h.GlobalScheduleQuery).Methods("POST").Name("add_to_global_schedule")
-	r.Handle("/api/v1/fleet/global/schedule/{id}", h.ModifyGlobalSchedule).Methods("PATCH").Name("modify_global_schedule")
-	r.Handle("/api/v1/fleet/global/schedule/{id}", h.DeleteGlobalSchedule).Methods("DELETE").Name("delete_global_schedule")
+	r.Handle("/api/v1/fleet/global/schedule/{id:[0-9]+}", h.ModifyGlobalSchedule).Methods("PATCH").Name("modify_global_schedule")
+	r.Handle("/api/v1/fleet/global/schedule/{id:[0-9]+}", h.DeleteGlobalSchedule).Methods("DELETE").Name("delete_global_schedule")
 
 	r.Handle("/api/v1/fleet/labels", h.CreateLabel).Methods("POST").Name("create_label")
-	r.Handle("/api/v1/fleet/labels/{id}", h.ModifyLabel).Methods("PATCH").Name("modify_label")
-	r.Handle("/api/v1/fleet/labels/{id}", h.GetLabel).Methods("GET").Name("get_label")
+	r.Handle("/api/v1/fleet/labels/{id:[0-9]+}", h.ModifyLabel).Methods("PATCH").Name("modify_label")
+	r.Handle("/api/v1/fleet/labels/{id:[0-9]+}", h.GetLabel).Methods("GET").Name("get_label")
 	r.Handle("/api/v1/fleet/labels", h.ListLabels).Methods("GET").Name("list_labels")
-	r.Handle("/api/v1/fleet/labels/{id}/hosts", h.ListHostsInLabel).Methods("GET").Name("list_hosts_in_label")
+	r.Handle("/api/v1/fleet/labels/{id:[0-9]+}/hosts", h.ListHostsInLabel).Methods("GET").Name("list_hosts_in_label")
 	r.Handle("/api/v1/fleet/labels/{name}", h.DeleteLabel).Methods("DELETE").Name("delete_label")
-	r.Handle("/api/v1/fleet/labels/id/{id}", h.DeleteLabelByID).Methods("DELETE").Name("delete_label_by_id")
+	r.Handle("/api/v1/fleet/labels/id/{id:[0-9]+}", h.DeleteLabelByID).Methods("DELETE").Name("delete_label_by_id")
 	r.Handle("/api/v1/fleet/spec/labels", h.ApplyLabelSpecs).Methods("POST").Name("apply_label_specs")
 	r.Handle("/api/v1/fleet/spec/labels", h.GetLabelSpecs).Methods("GET").Name("get_label_specs")
 	r.Handle("/api/v1/fleet/spec/labels/{name}", h.GetLabelSpec).Methods("GET").Name("get_label_spec")
 
-	r.Handle("/api/v1/fleet/hosts", h.ListHosts).Methods("GET").Name("list_hosts")
-	r.Handle("/api/v1/fleet/host_summary", h.GetHostSummary).Methods("GET").Name("get_host_summary")
-	r.Handle("/api/v1/fleet/hosts/{id}", h.GetHost).Methods("GET").Name("get_host")
 	r.Handle("/api/v1/fleet/hosts/identifier/{identifier}", h.HostByIdentifier).Methods("GET").Name("host_by_identifier")
-	r.Handle("/api/v1/fleet/hosts/{id}", h.DeleteHost).Methods("DELETE").Name("delete_host")
+	r.Handle("/api/v1/fleet/hosts/{id:[0-9]+}", h.DeleteHost).Methods("DELETE").Name("delete_host")
 	r.Handle("/api/v1/fleet/hosts/transfer", h.AddHostsToTeam).Methods("POST").Name("add_hosts_to_team")
 	r.Handle("/api/v1/fleet/hosts/transfer/filter", h.AddHostsToTeamByFilter).Methods("POST").Name("add_hosts_to_team_by_filter")
-	r.Handle("/api/v1/fleet/hosts/{id}/refetch", h.RefetchHost).Methods("POST").Name("refetch_host")
+	r.Handle("/api/v1/fleet/hosts/{id:[0-9]+}/refetch", h.RefetchHost).Methods("POST").Name("refetch_host")
 
 	r.Handle("/api/v1/fleet/targets", h.SearchTargets).Methods("POST").Name("search_targets")
 
@@ -650,20 +630,15 @@ func attachFleetAPIRoutes(r *mux.Router, h *fleetHandlers) {
 	r.Handle("/api/v1/fleet/status/result_store", h.StatusResultStore).Methods("GET").Name("status_result_store")
 	r.Handle("/api/v1/fleet/status/live_query", h.StatusLiveQuery).Methods("GET").Name("status_live_query")
 
-	r.Handle("/api/v1/fleet/carves", h.ListCarves).Methods("GET").Name("list_carves")
-	r.Handle("/api/v1/fleet/carves/{id}", h.GetCarve).Methods("GET").Name("get_carve")
-	r.Handle("/api/v1/fleet/carves/{id}/block/{block_id}", h.GetCarveBlock).Methods("GET").Name("get_carve_block")
-
 	r.Handle("/api/v1/fleet/teams", h.CreateTeam).Methods("POST").Name("create_team")
 	r.Handle("/api/v1/fleet/teams", h.ListTeams).Methods("GET").Name("list_teams")
-	r.Handle("/api/v1/fleet/teams/{id}", h.ModifyTeam).Methods("PATCH").Name("modify_team")
-	r.Handle("/api/v1/fleet/teams/{id}", h.DeleteTeam).Methods("DELETE").Name("delete_team")
-	r.Handle("/api/v1/fleet/teams/{id}/agent_options", h.ModifyTeamAgentOptions).Methods("POST").Name("modify_team_agent_options")
-	r.Handle("/api/v1/fleet/teams/{id}/users", h.ListTeamUsers).Methods("GET").Name("team_users")
-	r.Handle("/api/v1/fleet/teams/{id}/users", h.AddTeamUsers).Methods("PATCH").Name("add_team_users")
-	r.Handle("/api/v1/fleet/teams/{id}/users", h.DeleteTeamUsers).Methods("DELETE").Name("delete_team_users")
-	r.Handle("/api/v1/fleet/teams/{id}/secrets", h.TeamEnrollSecrets).Methods("GET").Name("get_team_enroll_secrets")
-
+	r.Handle("/api/v1/fleet/teams/{id:[0-9]+}", h.ModifyTeam).Methods("PATCH").Name("modify_team")
+	r.Handle("/api/v1/fleet/teams/{id:[0-9]+}", h.DeleteTeam).Methods("DELETE").Name("delete_team")
+	r.Handle("/api/v1/fleet/teams/{id:[0-9]+}/agent_options", h.ModifyTeamAgentOptions).Methods("POST").Name("modify_team_agent_options")
+	r.Handle("/api/v1/fleet/teams/{id:[0-9]+}/users", h.ListTeamUsers).Methods("GET").Name("team_users")
+	r.Handle("/api/v1/fleet/teams/{id:[0-9]+}/users", h.AddTeamUsers).Methods("PATCH").Name("add_team_users")
+	r.Handle("/api/v1/fleet/teams/{id:[0-9]+}/users", h.DeleteTeamUsers).Methods("DELETE").Name("delete_team_users")
+	r.Handle("/api/v1/fleet/teams/{id:[0-9]+}/secrets", h.TeamEnrollSecrets).Methods("GET").Name("get_team_enroll_secrets")
 	r.Handle("/api/v1/osquery/enroll", h.EnrollAgent).Methods("POST").Name("enroll_agent")
 	r.Handle("/api/v1/osquery/config", h.GetClientConfig).Methods("POST").Name("get_client_config")
 	r.Handle("/api/v1/osquery/distributed/read", h.GetDistributedQueries).Methods("POST").Name("get_distributed_queries")
@@ -671,26 +646,68 @@ func attachFleetAPIRoutes(r *mux.Router, h *fleetHandlers) {
 	r.Handle("/api/v1/osquery/log", h.SubmitLogs).Methods("POST").Name("submit_logs")
 	r.Handle("/api/v1/osquery/carve/begin", h.CarveBegin).Methods("POST").Name("carve_begin")
 	r.Handle("/api/v1/osquery/carve/block", h.CarveBlock).Methods("POST").Name("carve_block")
-
-	r.Handle("/api/v1/fleet/activities", h.ListActivities).Methods("GET").Name("list_activities")
 }
 
 func attachNewStyleFleetAPIRoutes(r *mux.Router, svc fleet.Service, opts []kithttp.ServerOption) {
-	handle("POST", "/api/v1/fleet/users/roles/spec", makeApplyUserRoleSpecsEndpoint(svc, opts), "apply_user_roles_spec", r)
-	handle("POST", "/api/v1/fleet/translate", makeTranslatorEndpoint(svc, opts), "translator", r)
-	handle("POST", "/api/v1/fleet/spec/teams", makeApplyTeamSpecsEndpoint(svc, opts), "apply_team_specs", r)
+	e := NewUserAuthenticatedEndpointer(svc, opts, r)
+	e.POST("/api/v1/fleet/users/roles/spec", applyUserRoleSpecsEndpoint, applyUserRoleSpecsRequest{})
+	e.POST("/api/v1/fleet/translate", translatorEndpoint, translatorRequest{})
+	e.POST("/api/v1/fleet/spec/teams", applyTeamSpecsEndpoint, applyTeamSpecsRequest{})
+	e.PATCH("/api/v1/fleet/teams/{team_id:[0-9]+}/secrets", modifyTeamEnrollSecretsEndpoint, modifyTeamEnrollSecretsRequest{})
 
-	handle("GET", "/api/v1/fleet/team/{team_id}/schedule", makeGetTeamScheduleEndpoint(svc, opts), "get_team_schedule", r)
-	handle("POST", "/api/v1/fleet/team/{team_id}/schedule", makeTeamScheduleQueryEndpoint(svc, opts), "add_to_team_schedule", r)
-	handle("PATCH", "/api/v1/fleet/team/{team_id}/schedule/{scheduled_query_id}", makeModifyTeamScheduleEndpoint(svc, opts), "edit_team_schedule", r)
-	handle("DELETE", "/api/v1/fleet/team/{team_id}/schedule/{scheduled_query_id}", makeDeleteTeamScheduleEndpoint(svc, opts), "delete_team_schedule", r)
-}
+	// Alias /api/v1/fleet/team/ -> /api/v1/fleet/teams/
+	e.GET("/api/v1/fleet/team/{team_id}/schedule", getTeamScheduleEndpoint, getTeamScheduleRequest{})
+	e.POST("/api/v1/fleet/team/{team_id}/schedule", teamScheduleQueryEndpoint, teamScheduleQueryRequest{})
+	e.PATCH("/api/v1/fleet/team/{team_id}/schedule/{scheduled_query_id}", modifyTeamScheduleEndpoint, modifyTeamScheduleRequest{})
+	e.DELETE("/api/v1/fleet/team/{team_id}/schedule/{scheduled_query_id}", deleteTeamScheduleEndpoint, deleteTeamScheduleRequest{})
+	// End alias
 
-func handle(verb, path string, handler http.Handler, name string, r *mux.Router) {
-	r.Handle(
-		path,
-		handler,
-	).Methods(verb).Name(name)
+	e.GET("/api/v1/fleet/teams/{team_id}/schedule", getTeamScheduleEndpoint, getTeamScheduleRequest{})
+	e.POST("/api/v1/fleet/teams/{team_id}/schedule", teamScheduleQueryEndpoint, teamScheduleQueryRequest{})
+	e.PATCH("/api/v1/fleet/teams/{team_id}/schedule/{scheduled_query_id}", modifyTeamScheduleEndpoint, modifyTeamScheduleRequest{})
+	e.DELETE("/api/v1/fleet/teams/{team_id}/schedule/{scheduled_query_id}", deleteTeamScheduleEndpoint, deleteTeamScheduleRequest{})
+
+	e.POST("/api/v1/fleet/global/policies", globalPolicyEndpoint, globalPolicyRequest{})
+	e.GET("/api/v1/fleet/global/policies", listGlobalPoliciesEndpoint, nil)
+	e.GET("/api/v1/fleet/global/policies/{policy_id}", getPolicyByIDEndpoint, getPolicyByIDRequest{})
+	e.POST("/api/v1/fleet/global/policies/delete", deleteGlobalPoliciesEndpoint, deleteGlobalPoliciesRequest{})
+	e.PATCH("/api/v1/fleet/global/policies/{policy_id}", modifyGlobalPolicyEndpoint, modifyGlobalPolicyRequest{})
+
+	// Alias /api/v1/fleet/team/ -> /api/v1/fleet/teams/
+	e.POST("/api/v1/fleet/team/{team_id}/policies", teamPolicyEndpoint, teamPolicyRequest{})
+	e.GET("/api/v1/fleet/team/{team_id}/policies", listTeamPoliciesEndpoint, listTeamPoliciesRequest{})
+	e.GET("/api/v1/fleet/team/{team_id}/policies/{policy_id}", getTeamPolicyByIDEndpoint, getTeamPolicyByIDRequest{})
+	e.POST("/api/v1/fleet/team/{team_id}/policies/delete", deleteTeamPoliciesEndpoint, deleteTeamPoliciesRequest{})
+	// End alias
+
+	e.POST("/api/v1/fleet/teams/{team_id}/policies", teamPolicyEndpoint, teamPolicyRequest{})
+	e.GET("/api/v1/fleet/teams/{team_id}/policies", listTeamPoliciesEndpoint, listTeamPoliciesRequest{})
+	e.GET("/api/v1/fleet/teams/{team_id}/policies/{policy_id}", getTeamPolicyByIDEndpoint, getTeamPolicyByIDRequest{})
+	e.POST("/api/v1/fleet/teams/{team_id}/policies/delete", deleteTeamPoliciesEndpoint, deleteTeamPoliciesRequest{})
+	e.PATCH("/api/v1/fleet/teams/{team_id}/policies/{policy_id}", modifyTeamPolicyEndpoint, modifyTeamPolicyRequest{})
+
+	e.POST("/api/v1/fleet/spec/policies", applyPolicySpecsEndpoint, applyPolicySpecsRequest{})
+
+	e.GET("/api/v1/fleet/packs/{id:[0-9]+}", getPackEndpoint, getPackRequest{})
+
+	e.GET("/api/v1/fleet/software", listSoftwareEndpoint, listSoftwareRequest{})
+	e.GET("/api/v1/fleet/software/count", countSoftwareEndpoint, countSoftwareRequest{})
+
+	e.GET("/api/v1/fleet/host_summary", getHostSummaryEndpoint, getHostSummaryRequest{})
+	e.GET("/api/v1/fleet/hosts", listHostsEndpoint, listHostsRequest{})
+	e.POST("/api/v1/fleet/hosts/delete", deleteHostsEndpoint, deleteHostsRequest{})
+	e.GET("/api/v1/fleet/hosts/{id:[0-9]+}", getHostEndpoint, getHostRequest{})
+	e.GET("/api/v1/fleet/hosts/count", countHostsEndpoint, countHostsRequest{})
+
+	e.GET("/api/v1/fleet/queries/run", runLiveQueryEndpoint, runLiveQueryRequest{})
+
+	e.PATCH("/api/v1/fleet/invites/{id:[0-9]+}", updateInviteEndpoint, updateInviteRequest{})
+
+	e.GET("/api/v1/fleet/activities", listActivitiesEndpoint, listActivitiesRequest{})
+
+	e.GET("/api/v1/fleet/carves", listCarvesEndpoint, listCarvesRequest{})
+	e.GET("/api/v1/fleet/carves/{id:[0-9]+}", getCarveEndpoint, getCarveRequest{})
+	e.GET("/api/v1/fleet/carves/{id:[0-9]+}/block/{block_id}", getCarveBlockEndpoint, getCarveBlockRequest{})
 }
 
 // TODO: this duplicates the one in makeKitHandler

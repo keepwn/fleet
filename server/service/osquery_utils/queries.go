@@ -3,7 +3,6 @@ package osquery_utils
 import (
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -11,7 +10,6 @@ import (
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
-	"github.com/pkg/errors"
 	"github.com/spf13/cast"
 )
 
@@ -67,7 +65,7 @@ var detailQueries = map[string]DetailQuery{
 				}
 
 				if strings.Contains(row["address"], ":") {
-					//IPv6
+					// IPv6
 					if firstIPv6 == nil {
 						firstIPv6 = row
 					}
@@ -149,7 +147,7 @@ var detailQueries = map[string]DetailQuery{
 				case "distributed_interval":
 					interval, err := strconv.Atoi(EmptyToZero(row["value"]))
 					if err != nil {
-						return errors.Wrap(err, "parsing distributed_interval")
+						return fmt.Errorf("parsing distributed_interval: %w", err)
 					}
 					host.DistributedInterval = uint(interval)
 
@@ -158,7 +156,7 @@ var detailQueries = map[string]DetailQuery{
 					// called `config_tls_refresh`.
 					interval, err := strconv.Atoi(EmptyToZero(row["value"]))
 					if err != nil {
-						return errors.Wrap(err, "parsing config_tls_refresh")
+						return fmt.Errorf("parsing config_tls_refresh: %w", err)
 					}
 					configTLSRefresh = uint(interval)
 					configTLSRefreshSeen = true
@@ -168,7 +166,7 @@ var detailQueries = map[string]DetailQuery{
 					// aliased to `config_refresh`.
 					interval, err := strconv.Atoi(EmptyToZero(row["value"]))
 					if err != nil {
-						return errors.Wrap(err, "parsing config_refresh")
+						return fmt.Errorf("parsing config_refresh: %w", err)
 					}
 					configRefresh = uint(interval)
 					configRefreshSeen = true
@@ -176,7 +174,7 @@ var detailQueries = map[string]DetailQuery{
 				case "logger_tls_period":
 					interval, err := strconv.Atoi(EmptyToZero(row["value"]))
 					if err != nil {
-						return errors.Wrap(err, "parsing logger_tls_period")
+						return fmt.Errorf("parsing logger_tls_period: %w", err)
 					}
 					host.LoggerTLSPeriod = uint(interval)
 				}
@@ -352,6 +350,22 @@ var detailQueries = map[string]DetailQuery{
 			return nil
 		},
 	},
+	"disk_space_unix": {
+		Query: `
+SELECT (blocks_available * 100 / blocks) AS percent_disk_space_available,
+       round((blocks_available * blocks_size *10e-10),2) AS gigs_disk_space_available
+FROM mounts WHERE path = '/' LIMIT 1;`,
+		Platforms:  append(fleet.HostLinuxOSs, "darwin"),
+		IngestFunc: ingestDiskSpace,
+	},
+	"disk_space_windows": {
+		Query: `
+SELECT ROUND((sum(free_space) * 100 * 10e-10) / (sum(size) * 10e-10)) AS percent_disk_space_available,
+       ROUND(sum(free_space) * 10e-10) AS gigs_disk_space_available
+FROM logical_drives WHERE file_system = 'NTFS' LIMIT 1;`,
+		Platforms:  []string{"windows"},
+		IngestFunc: ingestDiskSpace,
+	},
 }
 
 var softwareMacOS = DetailQuery{
@@ -360,6 +374,7 @@ SELECT
   name AS name,
   bundle_short_version AS version,
   'Application (macOS)' AS type,
+  bundle_identifier AS bundle_identifier,
   'apps' AS source
 FROM apps
 UNION
@@ -367,6 +382,7 @@ SELECT
   name AS name,
   version AS version,
   'Package (Python)' AS type,
+  '' AS bundle_identifier,
   'python_packages' AS source
 FROM python_packages
 UNION
@@ -374,6 +390,7 @@ SELECT
   name AS name,
   version AS version,
   'Browser plugin (Chrome)' AS type,
+  '' AS bundle_identifier,
   'chrome_extensions' AS source
 FROM chrome_extensions
 UNION
@@ -381,6 +398,7 @@ SELECT
   name AS name,
   version AS version,
   'Browser plugin (Firefox)' AS type,
+  '' AS bundle_identifier,
   'firefox_addons' AS source
 FROM firefox_addons
 UNION
@@ -388,6 +406,7 @@ SELECT
   name As name,
   version AS version,
   'Browser plugin (Safari)' AS type,
+  '' AS bundle_identifier,
   'safari_extensions' AS source
 FROM safari_extensions
 UNION
@@ -395,6 +414,7 @@ SELECT
   name AS name,
   version AS version,
   'Package (Homebrew)' AS type,
+  '' AS bundle_identifier,
   'homebrew_packages' AS source
 FROM homebrew_packages;
 `,
@@ -446,7 +466,7 @@ SELECT
   'python_packages' AS source
 FROM python_packages;
 `,
-	Platforms:  []string{"linux", "rhel", "ubuntu", "centos"},
+	Platforms:  fleet.HostLinuxOSs,
 	IngestFunc: ingestSoftware,
 }
 
@@ -513,22 +533,24 @@ FROM python_packages;
 }
 
 var usersQuery = DetailQuery{
-	Query: `SELECT uid, username, type, groupname FROM users u JOIN groups g ON g.gid=u.gid;`,
+	Query: `SELECT uid, username, type, groupname, shell FROM users u LEFT JOIN groups g ON g.gid=u.gid WHERE type <> 'special' AND shell NOT LIKE '%/false' AND shell NOT LIKE '%/nologin' AND shell NOT LIKE '%/shutdown' AND shell NOT LIKE '%/halt' AND username NOT LIKE '%$' AND username NOT LIKE '\_%' ESCAPE '\' AND NOT (username = 'sync' AND shell ='/bin/sync')`,
 	IngestFunc: func(logger log.Logger, host *fleet.Host, rows []map[string]string) error {
 		var users []fleet.HostUser
 		for _, row := range rows {
 			uid, err := strconv.Atoi(row["uid"])
 			if err != nil {
-				return errors.Wrapf(err, "converting uid %s to int", row["uid"])
+				return fmt.Errorf("converting uid %s to int: %w", row["uid"], err)
 			}
 			username := row["username"]
 			type_ := row["type"]
 			groupname := row["groupname"]
+			shell := row["shell"]
 			u := fleet.HostUser{
 				Uid:       uint(uid),
 				Username:  username,
 				Type:      type_,
 				GroupName: groupname,
+				Shell:     shell,
 			}
 			users = append(users, u)
 		}
@@ -545,6 +567,7 @@ func ingestSoftware(logger log.Logger, host *fleet.Host, rows []map[string]strin
 		name := row["name"]
 		version := row["version"]
 		source := row["source"]
+		bundleIdentifier := row["bundle_identifier"]
 		if name == "" {
 			level.Debug(logger).Log(
 				"msg", "host reported software with empty name",
@@ -563,12 +586,36 @@ func ingestSoftware(logger log.Logger, host *fleet.Host, rows []map[string]strin
 			)
 			continue
 		}
-		s := fleet.Software{Name: name, Version: version, Source: source}
+		s := fleet.Software{
+			Name:             name,
+			Version:          version,
+			Source:           source,
+			BundleIdentifier: bundleIdentifier,
+		}
 		software.Software = append(software.Software, s)
 	}
 
 	host.HostSoftware = software
 
+	return nil
+}
+
+func ingestDiskSpace(logger log.Logger, host *fleet.Host, rows []map[string]string) error {
+	if len(rows) != 1 {
+		logger.Log("component", "service", "method", "ingestDiskSpace", "err",
+			fmt.Sprintf("detail_query_disk_space expected single result got %d", len(rows)))
+		return nil
+	}
+
+	var err error
+	host.GigsDiskSpaceAvailable, err = strconv.ParseFloat(EmptyToZero(rows[0]["gigs_disk_space_available"]), 64)
+	if err != nil {
+		return err
+	}
+	host.PercentDiskSpaceAvailable, err = strconv.ParseFloat(EmptyToZero(rows[0]["percent_disk_space_available"]), 64)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -578,13 +625,13 @@ func GetDetailQueries(ac *fleet.AppConfig) map[string]DetailQuery {
 		generatedMap[key] = query
 	}
 
-	if os.Getenv("FLEET_BETA_SOFTWARE_INVENTORY") != "" || (ac != nil && ac.EnableSoftwareInventory) {
+	if ac != nil && ac.HostSettings.EnableSoftwareInventory {
 		generatedMap["software_macos"] = softwareMacOS
 		generatedMap["software_linux"] = softwareLinux
 		generatedMap["software_windows"] = softwareWindows
 	}
 
-	if ac != nil && ac.EnableHostUsers {
+	if ac != nil && ac.HostSettings.EnableHostUsers {
 		generatedMap["users"] = usersQuery
 	}
 

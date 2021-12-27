@@ -3,8 +3,8 @@ package service
 import (
 	"context"
 
+	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/fleet"
-	"github.com/pkg/errors"
 )
 
 // Scheduled queries are currently authorized the same as packs.
@@ -14,7 +14,7 @@ func (svc *Service) GetScheduledQueriesInPack(ctx context.Context, id uint, opts
 		return nil, err
 	}
 
-	return svc.ds.ListScheduledQueriesInPack(id, opts)
+	return svc.ds.ListScheduledQueriesInPack(ctx, id, opts)
 }
 
 func (svc *Service) GetScheduledQuery(ctx context.Context, id uint) (*fleet.ScheduledQuery, error) {
@@ -22,7 +22,7 @@ func (svc *Service) GetScheduledQuery(ctx context.Context, id uint) (*fleet.Sche
 		return nil, err
 	}
 
-	return svc.ds.ScheduledQuery(id)
+	return svc.ds.ScheduledQuery(ctx, id)
 }
 
 func (svc *Service) ScheduleQuery(ctx context.Context, sq *fleet.ScheduledQuery) (*fleet.ScheduledQuery, error) {
@@ -30,30 +30,34 @@ func (svc *Service) ScheduleQuery(ctx context.Context, sq *fleet.ScheduledQuery)
 		return nil, err
 	}
 
+	return svc.unauthorizedScheduleQuery(ctx, sq)
+}
+
+func (svc *Service) unauthorizedScheduleQuery(ctx context.Context, sq *fleet.ScheduledQuery) (*fleet.ScheduledQuery, error) {
 	// Fill in the name with query name if it is unset (because the UI
 	// doesn't provide a way to set it)
 	if sq.Name == "" {
-		query, err := svc.ds.Query(sq.QueryID)
+		query, err := svc.ds.Query(ctx, sq.QueryID)
 		if err != nil {
-			return nil, errors.Wrap(err, "lookup name for query")
+			return nil, ctxerr.Wrap(ctx, err, "lookup name for query")
 		}
 
-		packQueries, err := svc.ds.ListScheduledQueriesInPack(sq.PackID, fleet.ListOptions{})
+		packQueries, err := svc.ds.ListScheduledQueriesInPack(ctx, sq.PackID, fleet.ListOptions{})
 		if err != nil {
-			return nil, errors.Wrap(err, "find existing scheduled queries")
+			return nil, ctxerr.Wrap(ctx, err, "find existing scheduled queries")
 		}
 		_ = packQueries
 
 		sq.Name = findNextNameForQuery(query.Name, packQueries)
 		sq.QueryName = query.Name
 	} else if sq.QueryName == "" {
-		query, err := svc.ds.Query(sq.QueryID)
+		query, err := svc.ds.Query(ctx, sq.QueryID)
 		if err != nil {
-			return nil, errors.Wrap(err, "lookup name for query")
+			return nil, ctxerr.Wrap(ctx, err, "lookup name for query")
 		}
 		sq.QueryName = query.Name
 	}
-	return svc.ds.NewScheduledQuery(sq)
+	return svc.ds.NewScheduledQuery(ctx, sq)
 }
 
 // Add "-1" suffixes to the query name until it is unique
@@ -71,9 +75,13 @@ func (svc *Service) ModifyScheduledQuery(ctx context.Context, id uint, p fleet.S
 		return nil, err
 	}
 
-	sq, err := svc.GetScheduledQuery(ctx, id)
+	return svc.unauthorizedModifyScheduledQuery(ctx, id, p)
+}
+
+func (svc *Service) unauthorizedModifyScheduledQuery(ctx context.Context, id uint, p fleet.ScheduledQueryPayload) (*fleet.ScheduledQuery, error) {
+	sq, err := svc.ds.ScheduledQuery(ctx, id)
 	if err != nil {
-		return nil, errors.Wrap(err, "getting scheduled query to modify")
+		return nil, ctxerr.Wrap(ctx, err, "getting scheduled query to modify")
 	}
 
 	if p.PackID != nil {
@@ -113,7 +121,7 @@ func (svc *Service) ModifyScheduledQuery(ctx context.Context, id uint, p fleet.S
 		}
 	}
 
-	return svc.ds.SaveScheduledQuery(sq)
+	return svc.ds.SaveScheduledQuery(ctx, sq)
 }
 
 func (svc *Service) DeleteScheduledQuery(ctx context.Context, id uint) error {
@@ -121,5 +129,5 @@ func (svc *Service) DeleteScheduledQuery(ctx context.Context, id uint) error {
 		return err
 	}
 
-	return svc.ds.DeleteScheduledQuery(id)
+	return svc.ds.DeleteScheduledQuery(ctx, id)
 }

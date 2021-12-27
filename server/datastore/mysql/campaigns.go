@@ -1,13 +1,15 @@
 package mysql
 
 import (
+	"context"
 	"time"
 
+	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/fleet"
-	"github.com/pkg/errors"
+	"github.com/jmoiron/sqlx"
 )
 
-func (d *Datastore) NewDistributedQueryCampaign(camp *fleet.DistributedQueryCampaign) (*fleet.DistributedQueryCampaign, error) {
+func (d *Datastore) NewDistributedQueryCampaign(ctx context.Context, camp *fleet.DistributedQueryCampaign) (*fleet.DistributedQueryCampaign, error) {
 
 	sqlStatement := `
 		INSERT INTO distributed_query_campaigns (
@@ -17,9 +19,9 @@ func (d *Datastore) NewDistributedQueryCampaign(camp *fleet.DistributedQueryCamp
 		)
 		VALUES(?,?,?)
 	`
-	result, err := d.db.Exec(sqlStatement, camp.QueryID, camp.Status, camp.UserID)
+	result, err := d.writer.ExecContext(ctx, sqlStatement, camp.QueryID, camp.Status, camp.UserID)
 	if err != nil {
-		return nil, errors.Wrap(err, "inserting distributed query campaign")
+		return nil, ctxerr.Wrap(ctx, err, "inserting distributed query campaign")
 	}
 
 	id, _ := result.LastInsertId()
@@ -27,19 +29,19 @@ func (d *Datastore) NewDistributedQueryCampaign(camp *fleet.DistributedQueryCamp
 	return camp, nil
 }
 
-func (d *Datastore) DistributedQueryCampaign(id uint) (*fleet.DistributedQueryCampaign, error) {
+func (d *Datastore) DistributedQueryCampaign(ctx context.Context, id uint) (*fleet.DistributedQueryCampaign, error) {
 	sql := `
 		SELECT * FROM distributed_query_campaigns WHERE id = ?
 	`
 	campaign := &fleet.DistributedQueryCampaign{}
-	if err := d.db.Get(campaign, sql, id); err != nil {
-		return nil, errors.Wrap(err, "selecting distributed query campaign")
+	if err := sqlx.GetContext(ctx, d.reader, campaign, sql, id); err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "selecting distributed query campaign")
 	}
 
 	return campaign, nil
 }
 
-func (d *Datastore) SaveDistributedQueryCampaign(camp *fleet.DistributedQueryCampaign) error {
+func (d *Datastore) SaveDistributedQueryCampaign(ctx context.Context, camp *fleet.DistributedQueryCampaign) error {
 	sqlStatement := `
 		UPDATE distributed_query_campaigns SET
 			query_id = ?,
@@ -47,13 +49,13 @@ func (d *Datastore) SaveDistributedQueryCampaign(camp *fleet.DistributedQueryCam
 			user_id = ?
 		WHERE id = ?
 	`
-	result, err := d.db.Exec(sqlStatement, camp.QueryID, camp.Status, camp.UserID, camp.ID)
+	result, err := d.writer.ExecContext(ctx, sqlStatement, camp.QueryID, camp.Status, camp.UserID, camp.ID)
 	if err != nil {
-		return errors.Wrap(err, "updating distributed query campaign")
+		return ctxerr.Wrap(ctx, err, "updating distributed query campaign")
 	}
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return errors.Wrap(err, "rows affected updating distributed query campaign")
+		return ctxerr.Wrap(ctx, err, "rows affected updating distributed query campaign")
 	}
 	if rowsAffected == 0 {
 		return notFound("DistributedQueryCampaign").WithID(camp.ID)
@@ -62,14 +64,23 @@ func (d *Datastore) SaveDistributedQueryCampaign(camp *fleet.DistributedQueryCam
 	return nil
 }
 
-func (d *Datastore) DistributedQueryCampaignTargetIDs(id uint) (*fleet.HostTargets, error) {
+func (d *Datastore) DistributedQueryCampaignsForQuery(ctx context.Context, queryID uint) ([]*fleet.DistributedQueryCampaign, error) {
+	var campaigns []*fleet.DistributedQueryCampaign
+	err := sqlx.SelectContext(ctx, d.reader, &campaigns, `SELECT * FROM distributed_query_campaigns WHERE query_id=?`, queryID)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "getting campaigns for query")
+	}
+	return campaigns, nil
+}
+
+func (d *Datastore) DistributedQueryCampaignTargetIDs(ctx context.Context, id uint) (*fleet.HostTargets, error) {
 	sqlStatement := `
 		SELECT * FROM distributed_query_campaign_targets WHERE distributed_query_campaign_id = ?
 	`
 	targets := []fleet.DistributedQueryCampaignTarget{}
 
-	if err := d.db.Select(&targets, sqlStatement, id); err != nil {
-		return nil, errors.Wrap(err, "select distributed campaign target")
+	if err := sqlx.SelectContext(ctx, d.reader, &targets, sqlStatement, id); err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "select distributed campaign target")
 	}
 
 	hostIDs := []uint{}
@@ -84,14 +95,14 @@ func (d *Datastore) DistributedQueryCampaignTargetIDs(id uint) (*fleet.HostTarge
 		case fleet.TargetTeam:
 			teamIDs = append(teamIDs, target.TargetID)
 		default:
-			return nil, errors.Errorf("invalid target type: %d", target.Type)
+			return nil, ctxerr.Errorf(ctx, "invalid target type: %d", target.Type)
 		}
 	}
 
 	return &fleet.HostTargets{HostIDs: hostIDs, LabelIDs: labelIDs, TeamIDs: teamIDs}, nil
 }
 
-func (d *Datastore) NewDistributedQueryCampaignTarget(target *fleet.DistributedQueryCampaignTarget) (*fleet.DistributedQueryCampaignTarget, error) {
+func (d *Datastore) NewDistributedQueryCampaignTarget(ctx context.Context, target *fleet.DistributedQueryCampaignTarget) (*fleet.DistributedQueryCampaignTarget, error) {
 	sqlStatement := `
 		INSERT into distributed_query_campaign_targets (
 			type,
@@ -100,9 +111,9 @@ func (d *Datastore) NewDistributedQueryCampaignTarget(target *fleet.DistributedQ
 		)
 		VALUES (?,?,?)
 	`
-	result, err := d.db.Exec(sqlStatement, target.Type, target.DistributedQueryCampaignID, target.TargetID)
+	result, err := d.writer.ExecContext(ctx, sqlStatement, target.Type, target.DistributedQueryCampaignID, target.TargetID)
 	if err != nil {
-		return nil, errors.Wrap(err, "insert distributed campaign target")
+		return nil, ctxerr.Wrap(ctx, err, "insert distributed campaign target")
 	}
 
 	id, _ := result.LastInsertId()
@@ -110,7 +121,7 @@ func (d *Datastore) NewDistributedQueryCampaignTarget(target *fleet.DistributedQ
 	return target, nil
 }
 
-func (d *Datastore) CleanupDistributedQueryCampaigns(now time.Time) (expired uint, err error) {
+func (d *Datastore) CleanupDistributedQueryCampaigns(ctx context.Context, now time.Time) (expired uint, err error) {
 	// Expire old waiting/running campaigns
 	sqlStatement := `
 		UPDATE distributed_query_campaigns
@@ -118,16 +129,16 @@ func (d *Datastore) CleanupDistributedQueryCampaigns(now time.Time) (expired uin
 		WHERE (status = ? AND created_at < ?)
 		OR (status = ? AND created_at < ?)
 	`
-	result, err := d.db.Exec(sqlStatement, fleet.QueryComplete,
+	result, err := d.writer.ExecContext(ctx, sqlStatement, fleet.QueryComplete,
 		fleet.QueryWaiting, now.Add(-1*time.Minute),
 		fleet.QueryRunning, now.Add(-24*time.Hour))
 	if err != nil {
-		return 0, errors.Wrap(err, "updating distributed query campaign")
+		return 0, ctxerr.Wrap(ctx, err, "updating distributed query campaign")
 	}
 
 	exp, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "rows effected updating distributed query campaign")
+		return 0, ctxerr.Wrap(ctx, err, "rows affected updating distributed query campaign")
 	}
 
 	return uint(exp), nil

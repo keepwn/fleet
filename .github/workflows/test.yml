@@ -2,17 +2,25 @@ on:
   push:
     branches:
       - main
+      - patch-*
   pull_request:
+
 name: Run Tests
+
 jobs:
   test-e2e:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        go-version: ['^1.16.0']
-        fleet-tier: [core, basic]
+        go-version: ['^1.17.0']
+        fleet-tier: [free, premium]
     runs-on: ${{ matrix.os }}
     steps:
+    - name: Install Node
+      uses: actions/setup-node@v2
+      with:
+        node-version: '14'
     - name: Install Go
       uses: actions/setup-go@v2
       with:
@@ -71,13 +79,23 @@ jobs:
         make
 
     - name: Run E2E Tests
+      id: e2e
       run: |
         .github/scripts/check-infra-dependencies.sh all
         make e2e-reset-db
         make e2e-serve-${{ matrix.fleet-tier }} &
         sleep 3
         make e2e-setup
-        yarn cypress run --config-file cypress-${{ matrix.fleet-tier }}.json --config video=false
+        yarn cypress run --config-file cypress-${{ matrix.fleet-tier }}.json
+
+    - name: Upload artifacts
+      if: failure()
+      uses: actions/upload-artifact@v2
+      with:
+        name: cypress
+        path: |
+          cypress/screenshots/
+          cypress/videos/
 
 
   test-js:
@@ -143,55 +161,4 @@ jobs:
       run: |
         yarn prettier:check
 
-  test-go:
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-        go-version: ['^1.16.0']
-    runs-on: ${{ matrix.os }}
 
-    steps:
-    - name: Install Go
-      uses: actions/setup-go@v2
-      with:
-        go-version: ${{ matrix.go-version }}
-    - name: Checkout Code
-      uses: actions/checkout@v2
-
-    # Pre-starting dependencies here means they are ready to go when we need them.
-    - name: Start Infra Dependencies
-      # Use & to background this
-      run: docker-compose up -d mysql_test redis &
-
-    # It seems faster not to cache Go dependencies
-    - name: Install Go Dependencies
-      run: make deps-go
-
-    - name: Generate static files
-      run: |
-        export PATH=$PATH:~/go/bin
-        make generate-go
-
-    - name: Run Go Tests
-      run: |
-        MYSQL_TEST=1 make test-go
-
-
-  lint-go:
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-        go-version: ['^1.16.0']
-    runs-on: ${{ matrix.os }}
-
-    steps:
-    - name: Install Go
-      uses: actions/setup-go@v2
-      with:
-        go-version: ${{ matrix.go-version }}
-    - name: Checkout Code
-      uses: actions/checkout@v2
-
-    - name: Run Go Linting
-      run: |
-        make lint-go

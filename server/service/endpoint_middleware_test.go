@@ -2,14 +2,16 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
-	"time"
 
 	hostctx "github.com/fleetdm/fleet/v4/server/contexts/host"
+	"github.com/fleetdm/fleet/v4/server/contexts/viewer"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/mock"
-	"github.com/pkg/errors"
+	kitlog "github.com/go-kit/kit/log"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TODO update this test for new patterns
@@ -144,7 +146,7 @@ func TestGetNodeKey(t *testing.T) {
 		NodeKey int
 	}
 
-	var getNodeKeyTests = []struct {
+	getNodeKeyTests := []struct {
 		i         interface{}
 		expectKey string
 		shouldErr bool
@@ -191,7 +193,10 @@ func TestAuthenticatedHost(t *testing.T) {
 	expectedHost := fleet.Host{Hostname: "foo!"}
 	goodNodeKey := "foo bar baz bing bang boom"
 
-	ds.AuthenticateHostFunc = func(secret string) (*fleet.Host, error) {
+	ds.AppConfigFunc = func(ctx context.Context) (*fleet.AppConfig, error) {
+		return &fleet.AppConfig{}, nil
+	}
+	ds.AuthenticateHostFunc = func(ctx context.Context, secret string) (*fleet.Host, error) {
 		switch secret {
 		case goodNodeKey:
 			return &expectedHost, nil
@@ -200,12 +205,10 @@ func TestAuthenticatedHost(t *testing.T) {
 
 		}
 	}
-	ds.MarkHostSeenFunc = func(host *fleet.Host, t time.Time) error {
-		return nil
-	}
 
 	endpoint := authenticatedHost(
 		svc,
+		kitlog.NewNopLogger(),
 		func(ctx context.Context, request interface{}) (interface{}, error) {
 			host, ok := hostctx.FromContext(ctx)
 			assert.True(t, ok)
@@ -214,7 +217,7 @@ func TestAuthenticatedHost(t *testing.T) {
 		},
 	)
 
-	var authenticatedHostTests = []struct {
+	authenticatedHostTests := []struct {
 		nodeKey   string
 		shouldErr bool
 	}{
@@ -234,7 +237,7 @@ func TestAuthenticatedHost(t *testing.T) {
 
 	for _, tt := range authenticatedHostTests {
 		t.Run("", func(t *testing.T) {
-			var r = struct{ NodeKey string }{NodeKey: tt.nodeKey}
+			r := struct{ NodeKey string }{NodeKey: tt.nodeKey}
 			_, err := endpoint(context.Background(), r)
 			if tt.shouldErr {
 				assert.IsType(t, osqueryError{}, err)
@@ -243,5 +246,54 @@ func TestAuthenticatedHost(t *testing.T) {
 			}
 		})
 	}
+}
 
+func TestAuthenticatedUserMW(t *testing.T) {
+	ds := new(mock.Store)
+	svc := newTestService(ds, nil, nil)
+
+	authenticatedUserTests := []struct {
+		user      *fleet.User
+		shouldErr bool
+	}{
+		{
+			user: &fleet.User{
+				ID:                       32,
+				Name:                     "name",
+				Email:                    "em@il.com",
+				AdminForcedPasswordReset: true,
+				SSOEnabled:               true,
+			},
+			shouldErr: false,
+		},
+		{
+			user: &fleet.User{
+				ID:                       32,
+				Name:                     "name",
+				Email:                    "em@il.com",
+				AdminForcedPasswordReset: true,
+				SSOEnabled:               false,
+			},
+			shouldErr: true,
+		},
+	}
+
+	for _, tt := range authenticatedUserTests {
+		t.Run("", func(t *testing.T) {
+			ctx := viewer.NewContext(context.Background(), viewer.Viewer{User: tt.user})
+
+			nextCalled := false
+			endpoint := authenticatedUser(svc, func(ctx context.Context, request interface{}) (response interface{}, err error) {
+				nextCalled = true
+				return nil, nil
+			})
+			_, err := endpoint(ctx, nil)
+			if tt.shouldErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.True(t, nextCalled)
+			}
+		})
+	}
 }

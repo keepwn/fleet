@@ -1,8 +1,11 @@
 package fleet
 
 import (
-	"github.com/fleetdm/fleet/v4/server/ptr"
+	"bytes"
+	"encoding/json"
 	"testing"
+
+	"github.com/fleetdm/fleet/v4/server/ptr"
 )
 
 func TestPack_EditablePackType(t *testing.T) {
@@ -24,7 +27,7 @@ func TestPack_EditablePackType(t *testing.T) {
 		want   bool
 	}{
 		{
-			name:   "default",
+			name: "default",
 			fields: fields{
 				ID:          0,
 				Name:        "",
@@ -33,10 +36,10 @@ func TestPack_EditablePackType(t *testing.T) {
 				Disabled:    false,
 				Type:        nil,
 			},
-			want:   true,
+			want: true,
 		},
 		{
-			name:   "type is empty string",
+			name: "type is empty string",
 			fields: fields{
 				ID:          0,
 				Name:        "",
@@ -45,10 +48,10 @@ func TestPack_EditablePackType(t *testing.T) {
 				Disabled:    false,
 				Type:        ptr.String(""),
 			},
-			want:   true,
+			want: true,
 		},
 		{
-			name:   "type is not empty",
+			name: "type is not empty",
 			fields: fields{
 				ID:          0,
 				Name:        "Global",
@@ -57,10 +60,10 @@ func TestPack_EditablePackType(t *testing.T) {
 				Disabled:    false,
 				Type:        ptr.String("global"),
 			},
-			want:   false,
+			want: false,
 		},
 		{
-			name:   "type is not empty",
+			name: "type is not empty",
 			fields: fields{
 				ID:          0,
 				Name:        "team-1",
@@ -69,7 +72,7 @@ func TestPack_EditablePackType(t *testing.T) {
 				Disabled:    false,
 				Type:        ptr.String("team-1"),
 			},
-			want:   false,
+			want: false,
 		},
 	}
 	for _, tt := range tests {
@@ -90,5 +93,16 @@ func TestPack_EditablePackType(t *testing.T) {
 				t.Errorf("EditablePackType() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// See #2778.
+func TestPack_Marshal(t *testing.T) {
+	b, err := json.Marshal(&Pack{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("\"disabled\":false")) {
+		t.Fatalf("marshalled pack does not contain disabled field: %s", string(b))
 	}
 }

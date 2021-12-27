@@ -10,7 +10,7 @@ import InputField from "components/forms/fields/InputField";
 import validate from "components/forms/ConfigurePackQueryForm/validate";
 import {
   FREQUENCY_DROPDOWN_OPTIONS,
-  PLATFORM_OPTIONS,
+  PLATFORM_DROPDOWN_OPTIONS,
   LOGGING_TYPE_OPTIONS,
   MIN_OSQUERY_VERSION_OPTIONS,
 } from "utilities/constants";
@@ -103,7 +103,7 @@ export class ConfigurePackQueryForm extends Component {
     const loggingType = fields.logging_type.value || "snapshot";
 
     return (
-      <form className={baseClass} onSubmit={handleSubmit}>
+      <form className={baseClass} onSubmit={handleSubmit} autoComplete="off">
         <h2 className={`${baseClass}__title`}>Configuration</h2>
         <div className={`${baseClass}__fields`}>
           <Dropdown
@@ -124,7 +124,7 @@ export class ConfigurePackQueryForm extends Component {
           />
           <Dropdown
             {...fields.platform}
-            options={PLATFORM_OPTIONS}
+            options={PLATFORM_DROPDOWN_OPTIONS}
             placeholder="- - -"
             label="Platform"
             onChange={handlePlatformChoice}
